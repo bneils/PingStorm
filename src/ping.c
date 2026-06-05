@@ -7,10 +7,17 @@
 #include "ping.h"
 #include "types.h"
 #include "logging.h"
+#include "worker.h"
 
 // synchronize access to the mapped file
 pthread_mutex_t ping_lock;
 uint8_t *pings;
+
+uint64_t
+timespec_diff_ms (struct timespec start_time, struct timespec end_time) {
+  return (end_time.tv_sec - start_time.tv_sec) * 1e3
+    + (end_time.tv_nsec - start_time.tv_nsec) / 1e6;
+}
 
 int
 ping_send (ipaddr addr)
@@ -66,7 +73,7 @@ ping_task (struct ping_task *task, int epoll_fd)
     task->timeout_end = time (NULL) + PING_TIMEOUT;
     task->status = T_SENT;
 
-    debug ("ping_send: %s", ip_htos (task->addr));
+    //debug ("ping_send: %s", ip_htos (task->addr));
   }
 
   if (task->status == T_SENT) {
@@ -152,7 +159,7 @@ ping_task_look_renew (
     if (*cur <= UINT32_MAX) {
       ping_task_start_new (task, *cur, epoll_fd);
       list_push_back (tasks_waiting, &task->elem);
-      *cur = find_next_untried(*cur + 1, end);
+      *cur = pings_next_unknown(*cur + 1, end);
     }
 
     return 1;

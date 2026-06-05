@@ -1,7 +1,7 @@
 NAME=bin/scan
 CC=gcc
 OBJS=$(shell ls src/*.c | sed -e 's/\.c/\.o/' -e 's/src\//bin\//')
-CFLAGS=-Wall -Wextra -DDEBUG -O2 -Wpedantic
+CFLAGS=-Wall -Wextra -DDEBUG -O2 -Wpedantic -g
 
 .PHONY: clean
 
