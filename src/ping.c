@@ -1,7 +1,9 @@
+#include <asm-generic/errno.h>
 #include <string.h>
 #include <netinet/in.h>
 #include <netinet/ip_icmp.h>
 #include <arpa/inet.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include "ping.h"
@@ -50,8 +52,21 @@ ping_send (ipaddr addr)
   int ttl = UINT8_MAX;
   setsockopt (sock, IPPROTO_IP, IP_TTL, &ttl, sizeof ttl);
 
-  // Send the packet
-  if (sendto (sock, packetdata, sizeof packetdata, MSG_DONTWAIT, (struct sockaddr*) &sock_addr, sizeof sock_addr) < 0) {
+  // Double send buffer
+  int send_size;
+  socklen_t len = sizeof (send_size);
+  getsockopt (sock, SOL_SOCKET, SO_SNDBUF, &send_size, &len);
+  send_size *= 2;
+  setsockopt (sock, SOL_SOCKET, SO_SNDBUF, &send_size, sizeof send_size);
+
+  int send_flag = MSG_DONTWAIT;
+
+  // Send the packet; if it fails due to blocking then we retry but with the flag disabled.
+  while (sendto (sock, packetdata, sizeof packetdata, send_flag, (struct sockaddr*) &sock_addr, sizeof sock_addr) < 0) {
+    if (errno == EWOULDBLOCK || errno == EAGAIN) {
+      send_flag = 0;
+      continue;
+    }
     close (sock);
     PANIC ("sendto");
   }
@@ -122,6 +137,7 @@ ping_task_start_new (struct ping_task *task, ipaddr cur, int epoll_fd)
   // Subscribe to events for this file descriptor
   task->epoll_obj.events = EPOLLIN;
   task->epoll_obj.data.fd = task->sock;
+  task->epoll_obj.data.ptr = task;
 
   CHECK (0 > epoll_ctl (epoll_fd, EPOLL_CTL_ADD, task->sock, &task->epoll_obj));
 }

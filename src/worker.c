@@ -248,29 +248,22 @@ thread_worker (void *args)
     }
   }
 
-  for (;;) {
-    int num_ready = epoll_wait(epoll_fd, event_queue, MAX_EPOLL_EVENTS, (PING_TIMEOUT + 1 * 1000));
+  while (!list_empty (&tasks_waiting)) {
+    int num_ready = epoll_wait (epoll_fd, event_queue, MAX_EPOLL_EVENTS, (PING_TIMEOUT + 1) * 1000);
     sleep_drift ();
 
     // Handle received events
     for (int i = 0; i < num_ready; i++) {
       struct epoll_event event = event_queue[i];
-      int sock = event.data.fd;
+
       // epoll_ctl(2)
       ASSERT (event.events & EPOLLIN)
 
-      // Check up on timed out pings via linked list.
-      // Check up on responded pings via event list. When a ping responds, remove from linked list.
-      // TODO: fix this garbage
-      for (int i = 0; i < WORK_PER_THREAD; ++i) {
-        struct ping_task *task = &tasks[i];
-        if (task->sock == sock) {
-          ping_task_look_renew (task, &tasks_waiting, &cur, w_args->end, epoll_fd);
-          break;
-        }
-      }
+      struct ping_task *task = event.data.ptr;
+      ping_task_look_renew (task, &tasks_waiting, &cur, w_args->end, epoll_fd);
 		}
-    // Check for timeouts
+
+    // Check for timeouts via the linked list
     time_t now = time (NULL);
     while (!list_empty(&tasks_waiting)) {
       // Peek front of list
@@ -288,5 +281,6 @@ thread_worker (void *args)
     // Documented No-op, but may as well tell to sync
     msync (pings, IPV4_SIZE, MS_ASYNC);
   }
+  debug ("Finished work load");
   return NULL;
 }
