@@ -1,10 +1,13 @@
 #include <semaphore.h>
 #include <sys/mman.h>
+#include <time.h>
+#include <stdlib.h>
 
 #include "worker.h"
 #include "list.h"
 #include "logging.h"
 #include "ping.h"
+#include "types.h"
 
 // This resource is increased when the main thread has collected messages
 // from all threads that they are initialized.
@@ -37,20 +40,48 @@ const ipaddr special_subnets[17][2] = {
 
 static struct {
   int num_pings;
+  int num_success;
+  int num_failed;
   time_t current_time;
   pthread_mutex_t lock;
-} throughput = {0, 0, PTHREAD_MUTEX_INITIALIZER};
+} throughput;
+
+/* waits a very short amount of time to allow synchronized threads to drift */
+static void
+sleep_drift (void)
+{
+  struct timespec ts, rem;
+  long r = random ();
+
+  // 1-10 ms drift
+  ts.tv_nsec = r % (long)1e7;
+  ts.tv_sec = 0;
+
+  while (0 > nanosleep (&ts, &rem) && errno == EINTR)
+    ts = rem;
+}
 
 void
-throughput_tick (void)
+throughput_tick (enum PingReason reason)
 {
   pthread_mutex_lock (&throughput.lock);
   time_t current_time = time (NULL);
   throughput.num_pings++;
+  if (reason == P_NOREPLY) throughput.num_failed++;
+  else if (reason == P_REPLIED) throughput.num_success++;
+
   if (current_time - throughput.current_time >= 10) {
-    debug ("%d pings / sec", throughput.num_pings / (int)(current_time - throughput.current_time));
+    int duration = (int)(current_time - throughput.current_time);
+    debug ("%d timed out/sec, %d replied/sec (%d%%), total %d/sec",
+      throughput.num_failed / duration,
+      throughput.num_success / duration,
+      (throughput.num_pings) ? throughput.num_success * 100 / throughput.num_pings : 0,
+      throughput.num_pings / duration
+    );
     throughput.current_time = current_time;
     throughput.num_pings = 0;
+    throughput.num_failed = 0;
+    throughput.num_success = 0;
   }
   pthread_mutex_unlock (&throughput.lock);
 }
@@ -59,6 +90,10 @@ void
 throughput_init (void)
 {
   throughput.current_time = time (NULL);
+  throughput.num_failed = 0;
+  throughput.num_pings = 0;
+  throughput.num_success = 0;
+  pthread_mutex_init (&throughput.lock, NULL);
 }
 
 /* Returns 0 for public addresses, otherwise return the netmask */
@@ -215,22 +250,9 @@ thread_worker (void *args)
 
   for (;;) {
     int num_ready = epoll_wait(epoll_fd, event_queue, MAX_EPOLL_EVENTS, (PING_TIMEOUT + 1 * 1000));
+    sleep_drift ();
 
-    // Check for timeouts
-    time_t now = time (NULL);
-    while (!list_empty(&tasks_waiting)) {
-      // Peek front of list
-      struct ping_task *waiting = list_entry (list_front (&tasks_waiting), struct ping_task, elem);
-      ASSERT (waiting->addr != 0);
-      // Stop if sorted head is in the future
-      if (now < waiting->timeout_end)
-        break;
-      // Maybe renew this ping task, put it somewhere else on the list
-      // If the task wasn't replaced it probably means the timeout wasn't long enough
-      if (0 == ping_task_look_renew (waiting, &tasks_waiting, &cur, w_args->end, epoll_fd))
-        break;
-    }
-
+    // Handle received events
     for (int i = 0; i < num_ready; i++) {
       struct epoll_event event = event_queue[i];
       int sock = event.data.fd;
@@ -248,6 +270,21 @@ thread_worker (void *args)
         }
       }
 		}
+    // Check for timeouts
+    time_t now = time (NULL);
+    while (!list_empty(&tasks_waiting)) {
+      // Peek front of list
+      struct ping_task *waiting = list_entry (list_front (&tasks_waiting), struct ping_task, elem);
+      ASSERT (waiting->addr != 0);
+      // Stop if sorted head is in the future
+      if (now < waiting->timeout_end)
+        break;
+      // Maybe renew this ping task, put it somewhere else on the list
+      // If the task wasn't replaced it probably means the timeout wasn't long enough
+      if (0 == ping_task_look_renew (waiting, &tasks_waiting, &cur, w_args->end, epoll_fd))
+        break;
+    }
+
     // Documented No-op, but may as well tell to sync
     msync (pings, IPV4_SIZE, MS_ASYNC);
   }

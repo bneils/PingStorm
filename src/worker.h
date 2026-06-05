@@ -4,7 +4,7 @@
 #include "types.h"
 
 #define NUM_THREADS 8
-#define WORK_PER_THREAD 256
+#define WORK_PER_THREAD 6144
 #define MAX_EPOLL_EVENTS 256
 
 struct worker_args {
@@ -22,7 +22,7 @@ ipaddrl skip_special (ipaddrl addr);
 void *mem_find (uint8_t *p, uint8_t *end, uint8_t value);
 ipaddrl pings_next_unknown (ipaddrl addr, ipaddrl end);
 
-void throughput_tick (void);
+void throughput_tick (enum PingReason reason);
 void throughput_init (void);
 
 #endif

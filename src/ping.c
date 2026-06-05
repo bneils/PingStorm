@@ -146,7 +146,7 @@ ping_task_look_renew (
   if (task->status == T_DONE) {
     // Print the IP address and reply type
     //debug ("%s %s", ip_htos (task->addr), (task->reason == P_REPLIED) ? "online" : "unreachable");
-    throughput_tick ();
+    throughput_tick (task->reason);
 
     // Write to memory-mapped region
     pthread_mutex_lock (&ping_lock);
