@@ -2,6 +2,7 @@
 #include <sys/mman.h>
 #include <time.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 #include "worker.h"
 #include "list.h"
@@ -174,7 +175,7 @@ start_workers (void)
 
   // Wait for all workers to post the inited thread.
   for (int i = 0; i < NUM_THREADS; ++i)
-    sem_wait(&sem_worker_inited);
+    sem_wait (&sem_worker_inited);
 
   debug ("All threads ready");
   throughput_init ();
@@ -188,7 +189,6 @@ start_workers (void)
     pthread_join (tids[i], NULL);
 }
 
-
 void *
 thread_worker (void *args)
 {
@@ -201,6 +201,8 @@ thread_worker (void *args)
 
   list_init (&active_list);
   list_init (&free_list);
+
+  ASSERT (WORK_PER_THREAD > 0);
 
   // Pick starting point (which might take a while)
   cur = pings_next_unknown (w->begin, w->end);
@@ -220,16 +222,14 @@ thread_worker (void *args)
 
   // Fill the dead list which can be drawn from to create new tasks.
   for (int i = 0; i < WORK_PER_THREAD; ++i) {
-    ping_task_erase (&tasks[i]);
+    ping_task_init (&tasks[i], epoll_fd);
     list_push_back (&free_list, &tasks[i].elem);
   }
 
-  ASSERT (!list_empty (&free_list));
-
   // Initialize first task
   struct ping_task *t = list_entry (list_pop_front (&free_list), struct ping_task, elem);
-  ping_task_init (t, cur);
-  CHECK (0 > ping_task_advance (t, epoll_fd, false));
+  ping_task_assign (t, cur);
+  CHECK (0 > ping_task_advance (t));
   list_push_back (&active_list, &t->elem);
   // Advance the address cursor
   cur = pings_next_unknown (cur + 1, w->end);
@@ -246,13 +246,12 @@ thread_worker (void *args)
       ASSERT (event.events & EPOLLIN)
 
       struct ping_task *task = event.data.ptr;
-      CHECK (0 > ping_task_advance (task, epoll_fd, false));
+      CHECK (0 > ping_task_advance (task));
       if (task->status != T_DONE)
         continue;
 
       // Close this task.
-      ping_task_done (task);
-      list_push_back (&free_list, &task->elem);
+      ping_task_done (task, &free_list);
 		}
 
     // Check for timeouts via the linked list
@@ -265,12 +264,11 @@ thread_worker (void *args)
       if (now < task->timeout_end)
         break;
 
-      CHECK (0 > ping_task_advance (task, epoll_fd, true));
+      CHECK (0 > ping_task_advance (task));
       // If the task isn't done, we aren't waiting long enough.
       ASSERT (task->status == T_DONE);
 
-      ping_task_done (task);
-      list_push_back (&free_list, &task->elem);
+      ping_task_done (task, &free_list);
     }
 
     struct timespec start_time, end_time;
@@ -281,10 +279,10 @@ thread_worker (void *args)
     while (cur <= UINT32_MAX && !list_empty (&free_list)) {
       // Try initiating the next task
       struct ping_task *task = list_entry (list_front (&free_list), struct ping_task, elem);
-      ping_task_init (task, cur);
+      ping_task_assign (task, cur);
 
       // Stop if it fails
-      if (0 > ping_task_advance (task, epoll_fd, false))
+      if (0 > ping_task_advance (task))
         break;
 
       // If successful, we move it from the free list to the active list, then getting the next address.
@@ -301,6 +299,9 @@ thread_worker (void *args)
         break;
     }
   }
+  // Free the opened sockets
+  for (size_t i = 0; i < CLEN (tasks); ++i)
+    ping_task_destroy (&tasks[i], epoll_fd);
   debug ("Finished work load");
   return NULL;
 }

@@ -10,6 +10,7 @@
 #include "types.h"
 #include "logging.h"
 #include "worker.h"
+#include "list.h"
 
 // synchronize access to the mapped file
 pthread_mutex_t ping_lock;
@@ -22,10 +23,10 @@ timespec_diff_ms (struct timespec start_time, struct timespec end_time) {
 }
 
 /* Try sending an ICMP echo without blocking.
- * Returns socket file descriptor on success and -1 if it would block.
+ * Returns 0 on success and -1 if it would block.
  * This function signals system network congestion. */
 int
-ping_send (ipaddr addr)
+ping_send (int sock, ipaddr addr)
 {
   // Source: https://sturmflut.github.io/linux/ubuntu/2015/01/17/unprivileged-icmp-sockets-on-linux/
   // This helped me with the socket creation, though I've used my own before.
@@ -33,8 +34,6 @@ ping_send (ipaddr addr)
   struct icmphdr icmp_hdr;
   char packetdata[sizeof icmp_hdr + sizeof PING_MESSAGE];
 
-  // Create a datagram ICMP socket
-  int sock = socket (AF_INET, SOCK_DGRAM, IPPROTO_ICMP);
   CHECK (sock < 0);
 
   // Initialize the destination address
@@ -52,14 +51,9 @@ ping_send (ipaddr addr)
   memcpy (packetdata, &icmp_hdr, sizeof icmp_hdr);
   memcpy (packetdata + sizeof(icmp_hdr), PING_MESSAGE, sizeof PING_MESSAGE);
 
-  // Set the TTL to something high
-  int ttl = UINT8_MAX;
-  setsockopt (sock, IPPROTO_IP, IP_TTL, &ttl, sizeof ttl);
-
   // Send the packet; if it fails due to blocking then we retry but with the flag disabled.
   if (sendto (sock, packetdata, sizeof packetdata, MSG_DONTWAIT, (struct sockaddr *) &sock_addr, sizeof sock_addr) < 0) {
-    // If it failed then we should free the socket we allocated
-    close (sock);
+    // If it failed then we should return
     if (errno == EWOULDBLOCK || errno == EAGAIN) {
       errno = 0;
       return -1;
@@ -67,7 +61,7 @@ ping_send (ipaddr addr)
     PANIC ("sendto");
   }
 
-  return sock;
+  return 0;
 }
 
 /* Advance a ping task to a different status (like T_DONE or T_SENT).
@@ -76,33 +70,26 @@ ping_send (ipaddr addr)
  * Returns 0 on successful advancement or -1 if it could not advance (T_NONE).
  */
 int
-ping_task_advance (struct ping_task *task, int epoll_fd, bool timed_out)
+ping_task_advance (struct ping_task *task)
 {
   if (task->status == T_NONE) return -1;
   if (task->status == T_DONE) return 0;
 
   if (task->status == T_NOTSENT) {
     // Try to send the ping.
-    if (0 > (task->sock = ping_send (task->addr))) {
+    if (0 > (ping_send (task->sock, task->addr))) {
       task->status = T_NONE;
       return -1;
     }
 
     task->timeout_end = time (NULL) + PING_TIMEOUT;
     task->status = T_SENT;
-
-    // Subscribe to events for this file descriptor
-    task->epoll_obj.events = EPOLLIN;
-    task->epoll_obj.data.fd = task->sock;
-    task->epoll_obj.data.ptr = task;
-
-    CHECK (0 > epoll_ctl (epoll_fd, EPOLL_CTL_ADD, task->sock, &task->epoll_obj));
   }
 
   if (task->status == T_SENT) {
     char recv_buf[256];
 
-    if (timed_out) {
+    if (time (NULL) >= task->timeout_end) {
       // Skip checking the socket if we know it has timed out
       task->reason = P_NOREPLY;
       task->status = T_DONE;
@@ -118,29 +105,50 @@ ping_task_advance (struct ping_task *task, int epoll_fd, bool timed_out)
       task->reason = P_NOREPLY;
       task->status = T_DONE;
     }
-
-    // Free task's resources.
-    if (task->status == T_DONE) {
-      CHECK (0 > epoll_ctl(epoll_fd, EPOLL_CTL_DEL, task->sock, NULL));
-      CHECK (close (task->sock));
-    }
   }
   return task->reason;
 }
 
-/* Initialize the ping_task object needed for the first call to ping_task_advance */
+/* Initialize a task with a socket and in epoll. Called only once per task object during its lifetime. */
 void
-ping_task_init (struct ping_task *task, ipaddr addr)
+ping_task_init (struct ping_task *task, int epoll_fd)
+{
+  ping_task_erase (task);
+
+  task->sock = socket (AF_INET, SOCK_DGRAM, IPPROTO_ICMP);
+  CHECK (0 > task->sock);
+  // Increase TTL
+  int ttl = UINT8_MAX;
+  CHECK (0 > setsockopt (task->sock, IPPROTO_IP, IP_TTL, &ttl, sizeof ttl));
+
+  // Subscribe to events for this file descriptor
+  struct epoll_event event;
+  event.events = EPOLLIN;
+  // This union can only store 1 piece of metadata
+  event.data.ptr = task;
+  CHECK (0 > epoll_ctl (epoll_fd, EPOLL_CTL_ADD, task->sock, &event));
+}
+
+void
+ping_task_destroy (struct ping_task *task, int epoll_fd)
+{
+  CHECK (0 > close (task->sock));
+  CHECK (0 > epoll_ctl(epoll_fd, EPOLL_CTL_DEL, task->sock, NULL));
+}
+
+/* Assign the ping_task's arguments for the first call to ping_task_advance */
+void
+ping_task_assign (struct ping_task *task, ipaddr addr)
 {
   task->addr = addr;
   task->status = T_NOTSENT;
   task->reason = P_UNKNOWN;
 }
 
-/* Takes a finished ping task and cleans up: removes it from the list, writes to disk, and resets the state.
+/* Takes a finished ping task and cleans up: removes it from the list and writes to disk.
  */
 void
-ping_task_done (struct ping_task *task)
+ping_task_done (struct ping_task *task, struct list *free_list)
 {
   ASSERT (task->status == T_DONE);
 
@@ -153,10 +161,11 @@ ping_task_done (struct ping_task *task)
 
   // Remove task from its list
   list_remove (&task->elem);
-  task->elem.next = NULL;
-  task->elem.prev = NULL;
 
-  ping_task_erase (task);
+  // Put them back onto their respective lists
+  list_push_back (free_list, &task->elem);
+
+  task->status = T_NONE;
 }
 
 /* Gives a string from an IPv4 address. Cannot be used recursively or ephemerally. Thread-safe. */
