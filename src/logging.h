@@ -13,10 +13,10 @@
 #define debug(fmt, ...)
 #endif
 
-#define ASSERT(expr) CHECK(!(expr))
-#define CHECK(expr) if (expr) PANIC (#expr)
+#define ASSERT(expr) if (!(expr)) PANIC ("ASSERT(" #expr ")")
+#define CHECK(expr) if (expr) PANIC ("CHECK(" #expr ")")
 #define PANIC(msg) { \
-  fprintf (stderr, "(tid %lu) %s:%d (%s): %s\n", pthread_self (), __FILE__, __LINE__, (msg), (errno) ? strerror (errno) : "panic"); \
+  fprintf (stderr, "(tid %lu) %s:%d %s: %s\n", pthread_self (), __FILE__, __LINE__, (msg), (errno) ? strerror (errno) : "panic"); \
   exit (EXIT_FAILURE); \
 }
 

@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <time.h>
 #include <sys/epoll.h>
+#include <stdbool.h>
 
 #include "types.h"
 #include "list.h"
@@ -27,10 +28,12 @@ struct ping_task {
   struct epoll_event epoll_obj;
 };
 
+uint64_t timespec_diff_ms (struct timespec start_time, struct timespec end_time);
+
 char *ip_htos(ipaddr addr);
 
 int ping_send (ipaddr addr);
-int ping_task_advance (struct ping_task *task, int epoll_fd);
+int ping_task_advance (struct ping_task *task, int epoll_fd, bool timed_out);
 void ping_task_init (struct ping_task *task, ipaddr addr);
 void ping_task_erase (struct ping_task *t);
 void ping_task_done (struct ping_task *task);

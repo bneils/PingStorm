@@ -244,7 +244,7 @@ thread_worker (void *args)
   // Initialize first task
   struct ping_task *t = list_entry (list_pop_front (&free_list), struct ping_task, elem);
   ping_task_init (t, cur);
-  CHECK (0 > ping_task_advance (t, epoll_fd));
+  CHECK (0 > ping_task_advance (t, epoll_fd, false));
   list_push_back (&active_list, &t->elem);
   // Advance the address cursor
   cur = pings_next_unknown (cur + 1, w->end);
@@ -262,7 +262,7 @@ thread_worker (void *args)
       ASSERT (event.events & EPOLLIN)
 
       struct ping_task *task = event.data.ptr;
-      CHECK (0 > ping_task_advance (task, epoll_fd));
+      CHECK (0 > ping_task_advance (task, epoll_fd, false));
       if (task->status != T_DONE)
         continue;
 
@@ -281,7 +281,7 @@ thread_worker (void *args)
       if (now < task->timeout_end)
         break;
 
-      CHECK (0 > ping_task_advance (task, epoll_fd));
+      CHECK (0 > ping_task_advance (task, epoll_fd, true));
       // If the task isn't done, we aren't waiting long enough.
       ASSERT (task->status == T_DONE);
 
@@ -289,22 +289,30 @@ thread_worker (void *args)
       list_push_back (&free_list, &task->elem);
     }
 
-    // Skip drawing from the free list if we have no more tasks to make
-    if (cur > UINT32_MAX)
-      continue;
-
-    // As many tasks as you can in the active list
-    while (!list_empty (&free_list)) {
+    // Add many tasks as you can in the active list.
+    // Skip drawing from the free list if we have no more tasks to make.
+    while (cur <= UINT32_MAX && !list_empty (&free_list)) {
       // Try initiating the next task
       struct ping_task *task = list_entry (list_front (&free_list), struct ping_task, elem);
+      ASSERT (task->elem.next || task->elem.prev);
       ping_task_init (task, cur);
+      ASSERT (task->elem.next || task->elem.prev);
       // Stop if it fails
-      if (0 > ping_task_advance (task, epoll_fd))
+      struct timespec start_time, end_time;
+      clock_gettime (CLOCK_MONOTONIC_RAW, &start_time);
+      if (0 > ping_task_advance (task, epoll_fd, false))
         break;
+      clock_gettime (CLOCK_MONOTONIC_RAW, &end_time);
+      uint64_t delta_ms = timespec_diff_ms (start_time, end_time);
       // If successful, we move it from the free list to the active list, then getting the next address.
+      ASSERT (task->elem.next || task->elem.prev);
       list_remove (&task->elem);
       list_push_back (&active_list, &task->elem);
       cur = pings_next_unknown (cur + 1, w->end);
+
+      // If the last task too long, stop
+      if (delta_ms > 20)
+        break;
     }
 
     // Documented No-op, but may as well tell to sync

@@ -76,7 +76,7 @@ ping_send (ipaddr addr)
  * Returns 0 on successful advancement or -1 if it could not advance (T_NONE).
  */
 int
-ping_task_advance (struct ping_task *task, int epoll_fd)
+ping_task_advance (struct ping_task *task, int epoll_fd, bool timed_out)
 {
   if (task->status == T_NONE) return -1;
   if (task->status == T_DONE) return 0;
@@ -84,8 +84,7 @@ ping_task_advance (struct ping_task *task, int epoll_fd)
   if (task->status == T_NOTSENT) {
     // Try to send the ping.
     if (0 > (task->sock = ping_send (task->addr))) {
-      // On failure we reset the task.
-      ping_task_erase (task);
+      task->status = T_NONE;
       return -1;
     }
 
@@ -102,24 +101,28 @@ ping_task_advance (struct ping_task *task, int epoll_fd)
 
   if (task->status == T_SENT) {
     char recv_buf[256];
-    if (0 < recv (task->sock, recv_buf, sizeof recv_buf, MSG_DONTWAIT)) {
+
+    if (timed_out) {
+      // Skip checking the socket if we know it has timed out
+      task->reason = P_NOREPLY;
+      task->status = T_DONE;
+    } else if (0 < recv (task->sock, recv_buf, sizeof recv_buf, MSG_DONTWAIT)) {
       // TODO: validate the reply packet to make sure it's not just a router being helpful
-      CHECK (0 > epoll_ctl(epoll_fd, EPOLL_CTL_DEL, task->sock, NULL));
-      CHECK (close (task->sock));
       task->reason = P_REPLIED;
       task->status = T_DONE;
-    } else {
-      // We encountered an error (likely telling us the buffer's empty)
-      if (errno != EAGAIN && errno != EWOULDBLOCK)
-        PANIC ("recv");
-
+    } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+      // Error other than failure with MSG_DONTWAIT
+      PANIC ("recv");
+    } else if (time (NULL) >= task->timeout_end) {
       // The initial request is timed out
-      if (time (NULL) >= task->timeout_end) {
-        CHECK (0 > epoll_ctl(epoll_fd, EPOLL_CTL_DEL, task->sock, NULL));
-        CHECK (close (task->sock));
-        task->reason = P_NOREPLY;
-        task->status = T_DONE;
-      }
+      task->reason = P_NOREPLY;
+      task->status = T_DONE;
+    }
+
+    // Free task's resources.
+    if (task->status == T_DONE) {
+      CHECK (0 > epoll_ctl(epoll_fd, EPOLL_CTL_DEL, task->sock, NULL));
+      CHECK (close (task->sock));
     }
   }
   return task->reason;

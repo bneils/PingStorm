@@ -3,8 +3,8 @@
 
 #include "types.h"
 
-#define NUM_THREADS 8
-#define WORK_PER_THREAD (12 * 1024)
+#define NUM_THREADS 16
+#define WORK_PER_THREAD (16 * 1024)
 
 // Conservative 20% response rate (<10 is typical)
 #define MAX_EPOLL_EVENTS (WORK_PER_THREAD / 5)
