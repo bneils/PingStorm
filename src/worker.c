@@ -207,23 +207,24 @@ start_workers (void)
 void *
 thread_worker (void *args)
 {
-  struct worker_args *w_args = args;
+  struct worker_args *w = args;
   struct ping_task tasks[WORK_PER_THREAD];
   struct epoll_event event_queue[MAX_EPOLL_EVENTS];
-  struct list tasks_waiting; // ordered by timeout
+  struct list active_list, free_list;
   int epoll_fd;
   ipaddrl cur;
 
-  list_init (&tasks_waiting);
+  list_init (&active_list);
+  list_init (&free_list);
 
   // Pick starting point (which might take a while)
-  cur = pings_next_unknown (w_args->begin, w_args->end);
+  cur = pings_next_unknown (w->begin, w->end);
   if (cur > UINT32_MAX) {
-    debug ("P_UNKNOWN not found in range %lX-%lX", w_args->begin, w_args->end);
+    debug ("P_UNKNOWN not found in (%lX, %lX)", w->begin, w->end);
     sem_post (&sem_worker_inited);
     return NULL;
   }
-  debug ("Starting at %-15s (%8lX, %8lX)", ip_htos (cur), w_args->begin, w_args->end);
+  debug ("Starting at %-15s (%8lX, %8lX)", ip_htos (cur), w->begin, w->end);
   // Post when you've found your starting point
   sem_post (&sem_worker_inited);
   // Wait for main thread to signal readiness
@@ -232,23 +233,24 @@ thread_worker (void *args)
   // Create an epoll object
   CHECK (0 > (epoll_fd = epoll_create1 (0)));
 
-  // Initialize the work queue `tasks` with outgoing pings
+  // Fill the dead list which can be drawn from to create new tasks.
   for (int i = 0; i < WORK_PER_THREAD; ++i) {
-    struct ping_task *task = &tasks[i];
-    if (cur <= UINT32_MAX) {
-      // Start the ping task
-      ping_task_start_new (task, cur, epoll_fd);
-      list_push_back (&tasks_waiting, &task->elem);
-      // Advance the address cursor
-      cur = pings_next_unknown(cur + 1, w_args->end);
-    } else {
-      ping_task_init (task);
-      task->epoll_obj.events = EPOLLIN; // TODO??
-      task->epoll_obj.data.fd = -1;
-    }
+    ping_task_erase (&tasks[i]);
+    list_push_back (&free_list, &tasks[i].elem);
   }
 
-  while (!list_empty (&tasks_waiting)) {
+  ASSERT (!list_empty (&free_list));
+
+  // Initialize first task
+  struct ping_task *t = list_entry (list_pop_front (&free_list), struct ping_task, elem);
+  ping_task_init (t, cur);
+  CHECK (0 > ping_task_advance (t, epoll_fd));
+  list_push_back (&active_list, &t->elem);
+  // Advance the address cursor
+  cur = pings_next_unknown (cur + 1, w->end);
+
+  while (!list_empty (&active_list)) {
+    // Check for an socket events
     int num_ready = epoll_wait (epoll_fd, event_queue, MAX_EPOLL_EVENTS, (PING_TIMEOUT + 1) * 1000);
     sleep_drift ();
 
@@ -260,22 +262,49 @@ thread_worker (void *args)
       ASSERT (event.events & EPOLLIN)
 
       struct ping_task *task = event.data.ptr;
-      ping_task_look_renew (task, &tasks_waiting, &cur, w_args->end, epoll_fd);
+      CHECK (0 > ping_task_advance (task, epoll_fd));
+      if (task->status != T_DONE)
+        continue;
+
+      // Close this task.
+      ping_task_done (task);
+      list_push_back (&free_list, &task->elem);
 		}
 
     // Check for timeouts via the linked list
     time_t now = time (NULL);
-    while (!list_empty(&tasks_waiting)) {
+    while (!list_empty (&active_list)) {
       // Peek front of list
-      struct ping_task *waiting = list_entry (list_front (&tasks_waiting), struct ping_task, elem);
-      ASSERT (waiting->addr != 0);
+      struct ping_task *task = list_entry (list_front (&active_list), struct ping_task, elem);
+
       // Stop if sorted head is in the future
-      if (now < waiting->timeout_end)
+      if (now < task->timeout_end)
         break;
-      // Maybe renew this ping task, put it somewhere else on the list
-      // If the task wasn't replaced it probably means the timeout wasn't long enough
-      if (0 == ping_task_look_renew (waiting, &tasks_waiting, &cur, w_args->end, epoll_fd))
+
+      CHECK (0 > ping_task_advance (task, epoll_fd));
+      // If the task isn't done, we aren't waiting long enough.
+      ASSERT (task->status == T_DONE);
+
+      ping_task_done (task);
+      list_push_back (&free_list, &task->elem);
+    }
+
+    // Skip drawing from the free list if we have no more tasks to make
+    if (cur > UINT32_MAX)
+      continue;
+
+    // As many tasks as you can in the active list
+    while (!list_empty (&free_list)) {
+      // Try initiating the next task
+      struct ping_task *task = list_entry (list_front (&free_list), struct ping_task, elem);
+      ping_task_init (task, cur);
+      // Stop if it fails
+      if (0 > ping_task_advance (task, epoll_fd))
         break;
+      // If successful, we move it from the free list to the active list, then getting the next address.
+      list_remove (&task->elem);
+      list_push_back (&active_list, &task->elem);
+      cur = pings_next_unknown (cur + 1, w->end);
     }
 
     // Documented No-op, but may as well tell to sync

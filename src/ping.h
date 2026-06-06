@@ -28,18 +28,14 @@ struct ping_task {
 };
 
 char *ip_htos(ipaddr addr);
-int ping_send (ipaddr addr);
-enum PingReason ping_task (struct ping_task *task, int epoll_fd);
-void ping_task_start_new (struct ping_task *task, ipaddr cur, int epoll_fd);
-void ping_task_init (struct ping_task *t);
-void ping_init (void);
 
-int ping_task_look_renew (
-  struct ping_task *task,
-  struct list *tasks_waiting,
-  ipaddrl *cur, ipaddrl end,
-  int epoll_fd
-);
+int ping_send (ipaddr addr);
+int ping_task_advance (struct ping_task *task, int epoll_fd);
+void ping_task_init (struct ping_task *task, ipaddr addr);
+void ping_task_erase (struct ping_task *t);
+void ping_task_done (struct ping_task *task);
+
+void ping_init (void);
 
 
 #endif
