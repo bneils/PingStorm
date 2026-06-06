@@ -3,11 +3,15 @@
 
 #include "types.h"
 
-#define NUM_THREADS 16
-#define WORK_PER_THREAD (16 * 1024)
+// Threads should be number of cores
+#define NUM_THREADS 8
 
-// Conservative 20% response rate (<10 is typical)
-#define MAX_EPOLL_EVENTS (WORK_PER_THREAD / 5)
+// Should not exceed your system's capability
+// You genuinely will probably see depreciating returns.
+#define WORK_PER_THREAD (8 * 1024)
+
+// Conservative 5% response rate (keep this minimal)
+#define MAX_EPOLL_EVENTS (WORK_PER_THREAD / 20)
 
 struct worker_args {
   ipaddrl begin, end;

@@ -46,21 +46,6 @@ static struct {
   pthread_mutex_t lock;
 } throughput;
 
-/* waits a very short amount of time to allow synchronized threads to drift */
-static void
-sleep_drift (void)
-{
-  struct timespec ts, rem;
-  long r = random ();
-
-  // 1-10 ms drift
-  ts.tv_nsec = r % (long)1e7;
-  ts.tv_sec = 0;
-
-  while (0 > nanosleep (&ts, &rem) && errno == EINTR)
-    ts = rem;
-}
-
 void
 throughput_tick (enum PingReason reason)
 {
@@ -252,7 +237,6 @@ thread_worker (void *args)
   while (!list_empty (&active_list)) {
     // Check for an socket events
     int num_ready = epoll_wait (epoll_fd, event_queue, MAX_EPOLL_EVENTS, (PING_TIMEOUT + 1) * 1000);
-    sleep_drift ();
 
     // Handle received events
     for (int i = 0; i < num_ready; i++) {
@@ -289,34 +273,33 @@ thread_worker (void *args)
       list_push_back (&free_list, &task->elem);
     }
 
-    // Add many tasks as you can in the active list.
+    struct timespec start_time, end_time;
+    clock_gettime (CLOCK_MONOTONIC_RAW, &start_time);
+
+    // Add as many tasks as you can in the active list.
     // Skip drawing from the free list if we have no more tasks to make.
     while (cur <= UINT32_MAX && !list_empty (&free_list)) {
       // Try initiating the next task
       struct ping_task *task = list_entry (list_front (&free_list), struct ping_task, elem);
-      ASSERT (task->elem.next || task->elem.prev);
       ping_task_init (task, cur);
-      ASSERT (task->elem.next || task->elem.prev);
+
       // Stop if it fails
-      struct timespec start_time, end_time;
-      clock_gettime (CLOCK_MONOTONIC_RAW, &start_time);
       if (0 > ping_task_advance (task, epoll_fd, false))
         break;
-      clock_gettime (CLOCK_MONOTONIC_RAW, &end_time);
-      uint64_t delta_ms = timespec_diff_ms (start_time, end_time);
+
       // If successful, we move it from the free list to the active list, then getting the next address.
-      ASSERT (task->elem.next || task->elem.prev);
       list_remove (&task->elem);
       list_push_back (&active_list, &task->elem);
       cur = pings_next_unknown (cur + 1, w->end);
 
-      // If the last task too long, stop
-      if (delta_ms > 20)
+      // Only spend so much time in this loop.
+      // These few lines actually reduce CPU usage and increase throughput dramatically.
+      // It had to be placed intentionally because my CPU was hitting 100% and my computer would freeze.
+      clock_gettime (CLOCK_MONOTONIC_RAW, &end_time);
+      uint64_t delta_ms = timespec_diff_ms (start_time, end_time);
+      if (delta_ms >= PING_TIMEOUT * 1000)
         break;
     }
-
-    // Documented No-op, but may as well tell to sync
-    msync (pings, IPV4_SIZE, MS_ASYNC);
   }
   debug ("Finished work load");
   return NULL;
