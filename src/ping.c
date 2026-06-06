@@ -23,6 +23,12 @@ timespec_diff_ms (struct timespec start_time, struct timespec end_time) {
     + (end_time.tv_nsec - start_time.tv_nsec) / 1e6;
 }
 
+uint16_t
+hash_ipaddr (ipaddr addr)
+{
+  return ((addr & 0xff00) >> 8) ^ (addr & 0xff);
+}
+
 /* Try sending an ICMP echo without blocking.
  * Returns 0 on success and -1 if send failed.
  * The function may fail if `wait` is false, but can also fail in other scenarios,
@@ -47,8 +53,8 @@ ping_send (int sock, ipaddr addr, bool wait)
   // Initialize the ICMP header
   memset (&icmp_hdr, 0, sizeof icmp_hdr);
   icmp_hdr.type = ICMP_ECHO;
-  icmp_hdr.un.echo.id = 0; // ignored
-  icmp_hdr.un.echo.sequence = 1;
+  icmp_hdr.un.echo.id = 0; // TODO: encode IP into this
+  icmp_hdr.un.echo.sequence = htons (hash_ipaddr (addr));
 
   // Initialize the packet data (header and payload)
   memcpy (packetdata, &icmp_hdr, sizeof icmp_hdr);
@@ -133,7 +139,11 @@ ping_task_advance (struct ping_task *task)
   // We had a response waiting
   struct icmphdr *icmp_hd = (void *)recv_buf;
   ASSERT (icmp_hd->type == ICMP_ECHOREPLY)
-  // TODO: check sequence no. / identification / source IP
+  // Try to check sequence no. / identification / source IP
+  if (icmp_hd->un.echo.sequence != htons (hash_ipaddr(task->addr))) {
+    debug ("ping address doesn't match");
+    return 0;
+  }
 
   if (task->reason == P_UNKNOWN) {
     // Don't stop the task if we only get 1 reply
