@@ -240,8 +240,10 @@ thread_worker (void *args)
   // Advance the address cursor
   cur = pings_next_unknown (cur + 1, w->end);
 
-  while (!list_empty (&active_list)) {
+  while (cur <= UINT32_MAX) {
     // Check for an socket events
+    if (list_empty (&active_list))
+      debug ("no tasks in queue");
     int num_ready = epoll_wait (epoll_fd, event_queue, MAX_EPOLL_EVENTS, (PING_TIMEOUT + 1) * 1000);
 
     // Handle received events

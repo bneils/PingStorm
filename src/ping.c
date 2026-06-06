@@ -5,6 +5,7 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <errno.h>
 
 #include "ping.h"
 #include "types.h"
@@ -23,7 +24,9 @@ timespec_diff_ms (struct timespec start_time, struct timespec end_time) {
 }
 
 /* Try sending an ICMP echo without blocking.
- * Returns 0 on success and -1 if it would block.
+ * Returns 0 on success and -1 if send failed.
+ * The function may fail if `wait` is false, but can also fail in other scenarios,
+ * so the return code should always be handled by the caller.
  * This function signals system network congestion. */
 int
 ping_send (int sock, ipaddr addr, bool wait)
@@ -32,7 +35,7 @@ ping_send (int sock, ipaddr addr, bool wait)
   // This helped me with the socket creation, though I've used my own before.
   struct sockaddr_in sock_addr;
   struct icmphdr icmp_hdr;
-  char packetdata[sizeof icmp_hdr + sizeof PING_MESSAGE];
+  char packetdata[sizeof icmp_hdr];
 
   CHECK (sock < 0);
 
@@ -49,16 +52,24 @@ ping_send (int sock, ipaddr addr, bool wait)
 
   // Initialize the packet data (header and payload)
   memcpy (packetdata, &icmp_hdr, sizeof icmp_hdr);
-  memcpy (packetdata + sizeof(icmp_hdr), PING_MESSAGE, sizeof PING_MESSAGE);
 
   // Send the packet; if it fails due to blocking then we retry but with the flag disabled.
-  if (sendto (sock, packetdata, sizeof packetdata, (wait) ? 0 : MSG_DONTWAIT, (struct sockaddr *) &sock_addr, sizeof sock_addr) < 0) {
-    CHECK (wait);
-    ASSERT (errno == EWOULDBLOCK || errno == EAGAIN);
-
-    // If it failed then we should return
-    errno = 0;
-    return -1;
+  if (0 > sendto (sock, packetdata, sizeof packetdata, (wait) ? 0 : MSG_DONTWAIT, (struct sockaddr *) &sock_addr, sizeof sock_addr)) {
+    switch (errno) {
+    // The usual culprit: the system warning us it would block (regardless of MSG_DONTWAIT)
+    case EWOULDBLOCK:
+    #if EAGAIN != EWOULDBLOCK
+    case EAGAIN:
+    #endif
+    // Other possible errors
+    case EINTR:
+    case ECONNRESET:
+    case ENOBUFS:
+      errno = 0;
+      return -1;
+    default:
+      PANIC ("Bad");
+    }
   }
 
   return 0;
@@ -77,32 +88,65 @@ ping_task_advance (struct ping_task *task)
 
   if (task->status == T_NOTSENT) {
     // Try to send the ping.
-    if (0 > (ping_send (task->sock, task->addr, false)))
+    if (0 > ping_send (task->sock, task->addr, true))
       return -1;
     task->timeout_end = time (NULL) + PING_TIMEOUT;
     task->status = T_SENT;
-  } else if (task->status == T_SENT) {
-    char recv_buf[256];
+    return 0;
+  }
 
-    if (time (NULL) >= task->timeout_end) {
-      // Skip checking the socket if we know it has timed out
-      if (task->reason == P_UNKNOWN) task->reason = P_NOREPLY;
-      task->status = T_DONE;
-    } else if (0 < recv (task->sock, recv_buf, sizeof recv_buf, MSG_DONTWAIT)) {
-      // TODO: validate the reply packet to make sure it's not just a router being helpful
-      if (task->reason == P_UNKNOWN) {
-        // Don't stop the task if we only get 1 reply
-        CHECK (0 > (ping_send (task->sock, task->addr, true)));
-        task->reason = P_REPLIED1;
-        task->timeout_end = time (NULL) + PING_TIMEOUT;
-      } else if (task->reason == P_REPLIED1) {
-        task->reason = P_REPLIED2;
-        task->status = T_DONE;
+  // Shouldn't happen
+  if (task->status != T_SENT)
+    return 0;
+
+  // Handle timed out tasks
+  if (time (NULL) >= task->timeout_end) {
+    // Skip checking the socket if we know it has timed out
+    if (task->reason == P_UNKNOWN) task->reason = P_NOREPLY;
+    task->status = T_DONE;
+    return 0;
+  }
+
+  // Try to read from the socket if it's not timed out
+  char recv_buf[256];
+  for (;;) {
+    if (0 > recv (task->sock, recv_buf, sizeof recv_buf, MSG_DONTWAIT))
+      switch (errno) {
+      // Retry due to interrupt (curse you unix)
+      case EINTR:
+        continue;
+      // Allow errors due to non-blocking mode
+      case EAGAIN:
+      #if EAGAIN != EWOULDBLOCK
+      case EWOULDBLOCK:
+      #endif
+      // Can be safely ignored
+      case ECONNREFUSED:
+      return 0;
+      default:
+        // Otherwise fatal errors
+        PANIC ("recv");
       }
-    } else { // if (errno != EAGAIN && errno != EWOULDBLOCK
-      // Error other than failure with MSG_DONTWAIT
-      PANIC ("recv");
-    }
+    break;
+  }
+
+  // We had a response waiting
+  struct icmphdr *icmp_hd = (void *)recv_buf;
+  ASSERT (icmp_hd->type == ICMP_ECHOREPLY)
+  // TODO: check sequence no. / identification / source IP
+
+  if (task->reason == P_UNKNOWN) {
+    // Don't stop the task if we only get 1 reply
+    for (int noretries = 3; noretries > 0; noretries--)
+      if (0 <= ping_send (task->sock, task->addr, true))
+        goto second_ping_sent;
+    PANIC ("failed after 3 tries");
+second_ping_sent:
+    task->reason = P_REPLIED1;
+    task->timeout_end = time (NULL) + PING_TIMEOUT;
+  } else if (task->reason == P_REPLIED1) {
+    task->reason = P_REPLIED2;
+    task->status = T_DONE;
   }
   return 0;
 }
@@ -130,8 +174,8 @@ ping_task_init (struct ping_task *task, int epoll_fd)
 void
 ping_task_destroy (struct ping_task *task, int epoll_fd)
 {
-  CHECK (0 > close (task->sock));
   CHECK (0 > epoll_ctl(epoll_fd, EPOLL_CTL_DEL, task->sock, NULL));
+  CHECK (0 > close (task->sock));
 }
 
 /* Assign the ping_task's arguments for the first call to ping_task_advance */

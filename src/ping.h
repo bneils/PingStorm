@@ -10,7 +10,6 @@
 #include "list.h"
 
 #define PING_FILENAME "ping.dat"
-#define PING_MESSAGE "Say cheese!"
 #define PING_TIMEOUT 10
 
 #define FITS_IPV4(ip) (ip <= UINT32_MAX)
