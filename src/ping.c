@@ -141,7 +141,7 @@ ping_task_advance (struct ping_task *task)
   ASSERT (icmp_hd->type == ICMP_ECHOREPLY)
   // Try to check sequence no. / identification / source IP
   if (icmp_hd->un.echo.sequence != htons (hash_ipaddr(task->addr))) {
-    debug ("ping address doesn't match");
+    debug ("ping address doesn't match: %X != %s", ntohs (icmp_hd->un.echo.sequence), ip_htos (task->addr));
     return 0;
   }
 
