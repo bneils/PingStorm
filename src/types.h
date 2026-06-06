@@ -17,7 +17,7 @@ enum TaskStatus {
   T_DONE = 3,
 };
 
-enum PingReason : uint8_t {
+enum PingReason {
   P_UNKNOWN = 0,
   P_NOREPLY = 1,
   P_REPLIED1 = 2,
