@@ -26,7 +26,7 @@ timespec_diff_ms (struct timespec start_time, struct timespec end_time) {
  * Returns 0 on success and -1 if it would block.
  * This function signals system network congestion. */
 int
-ping_send (int sock, ipaddr addr)
+ping_send (int sock, ipaddr addr, bool wait)
 {
   // Source: https://sturmflut.github.io/linux/ubuntu/2015/01/17/unprivileged-icmp-sockets-on-linux/
   // This helped me with the socket creation, though I've used my own before.
@@ -52,13 +52,13 @@ ping_send (int sock, ipaddr addr)
   memcpy (packetdata + sizeof(icmp_hdr), PING_MESSAGE, sizeof PING_MESSAGE);
 
   // Send the packet; if it fails due to blocking then we retry but with the flag disabled.
-  if (sendto (sock, packetdata, sizeof packetdata, MSG_DONTWAIT, (struct sockaddr *) &sock_addr, sizeof sock_addr) < 0) {
+  if (sendto (sock, packetdata, sizeof packetdata, (wait) ? 0 : MSG_DONTWAIT, (struct sockaddr *) &sock_addr, sizeof sock_addr) < 0) {
+    CHECK (wait);
+    ASSERT (errno == EWOULDBLOCK || errno == EAGAIN);
+
     // If it failed then we should return
-    if (errno == EWOULDBLOCK || errno == EAGAIN) {
-      errno = 0;
-      return -1;
-    }
-    PANIC ("sendto");
+    errno = 0;
+    return -1;
   }
 
   return 0;
@@ -77,36 +77,34 @@ ping_task_advance (struct ping_task *task)
 
   if (task->status == T_NOTSENT) {
     // Try to send the ping.
-    if (0 > (ping_send (task->sock, task->addr))) {
-      task->status = T_NONE;
+    if (0 > (ping_send (task->sock, task->addr, false)))
       return -1;
-    }
-
     task->timeout_end = time (NULL) + PING_TIMEOUT;
     task->status = T_SENT;
-  }
-
-  if (task->status == T_SENT) {
+  } else if (task->status == T_SENT) {
     char recv_buf[256];
 
     if (time (NULL) >= task->timeout_end) {
       // Skip checking the socket if we know it has timed out
-      task->reason = P_NOREPLY;
+      if (task->reason == P_UNKNOWN) task->reason = P_NOREPLY;
       task->status = T_DONE;
     } else if (0 < recv (task->sock, recv_buf, sizeof recv_buf, MSG_DONTWAIT)) {
       // TODO: validate the reply packet to make sure it's not just a router being helpful
-      task->reason = P_REPLIED;
-      task->status = T_DONE;
-    } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+      if (task->reason == P_UNKNOWN) {
+        // Don't stop the task if we only get 1 reply
+        CHECK (0 > (ping_send (task->sock, task->addr, true)));
+        task->reason = P_REPLIED1;
+        task->timeout_end = time (NULL) + PING_TIMEOUT;
+      } else if (task->reason == P_REPLIED1) {
+        task->reason = P_REPLIED2;
+        task->status = T_DONE;
+      }
+    } else { // if (errno != EAGAIN && errno != EWOULDBLOCK
       // Error other than failure with MSG_DONTWAIT
       PANIC ("recv");
-    } else if (time (NULL) >= task->timeout_end) {
-      // The initial request is timed out
-      task->reason = P_NOREPLY;
-      task->status = T_DONE;
     }
   }
-  return task->reason;
+  return 0;
 }
 
 /* Initialize a task with a socket and in epoll. Called only once per task object during its lifetime. */

@@ -41,7 +41,8 @@ const ipaddr special_subnets[17][2] = {
 
 static struct {
   int num_pings;
-  int num_success;
+  int num_reply1;
+  int num_reply2;
   int num_failed;
   time_t current_time;
   pthread_mutex_t lock;
@@ -52,22 +53,26 @@ throughput_tick (enum PingReason reason)
 {
   pthread_mutex_lock (&throughput.lock);
   time_t current_time = time (NULL);
-  throughput.num_pings++;
+
+  throughput.num_pings += (reason == P_NOREPLY) ? 1 : 2;
+
   if (reason == P_NOREPLY) throughput.num_failed++;
-  else if (reason == P_REPLIED) throughput.num_success++;
+  else if (reason == P_REPLIED1) throughput.num_reply1++;
+  else if (reason == P_REPLIED2) throughput.num_reply2++;
 
   if (current_time - throughput.current_time >= 10) {
     int duration = (int)(current_time - throughput.current_time);
-    debug ("%d timed out/sec, %d replied/sec (%d%%), total %d/sec",
+    debug ("%d timed out/sec, %.1f/sec (1 reply), %.1f/sec (2 replies), total %d/sec",
       throughput.num_failed / duration,
-      throughput.num_success / duration,
-      (throughput.num_pings) ? throughput.num_success * 100 / throughput.num_pings : 0,
+      (float)throughput.num_reply1 / duration,
+      (float)throughput.num_reply2 / duration,
       throughput.num_pings / duration
     );
     throughput.current_time = current_time;
     throughput.num_pings = 0;
     throughput.num_failed = 0;
-    throughput.num_success = 0;
+    throughput.num_reply1 = 0;
+    throughput.num_reply2 = 0;
   }
   pthread_mutex_unlock (&throughput.lock);
 }
@@ -78,7 +83,8 @@ throughput_init (void)
   throughput.current_time = time (NULL);
   throughput.num_failed = 0;
   throughput.num_pings = 0;
-  throughput.num_success = 0;
+  throughput.num_reply1 = 0;
+  throughput.num_reply2 = 0;
   pthread_mutex_init (&throughput.lock, NULL);
 }
 
@@ -247,11 +253,9 @@ thread_worker (void *args)
 
       struct ping_task *task = event.data.ptr;
       CHECK (0 > ping_task_advance (task));
-      if (task->status != T_DONE)
-        continue;
-
       // Close this task.
-      ping_task_done (task, &free_list);
+      if (task->status == T_DONE)
+        ping_task_done (task, &free_list);
 		}
 
     // Check for timeouts via the linked list
@@ -260,12 +264,10 @@ thread_worker (void *args)
       // Peek front of list
       struct ping_task *task = list_entry (list_front (&active_list), struct ping_task, elem);
 
-      // Stop if sorted head is in the future
       if (now < task->timeout_end)
         break;
 
       CHECK (0 > ping_task_advance (task));
-      // If the task isn't done, we aren't waiting long enough.
       ASSERT (task->status == T_DONE);
 
       ping_task_done (task, &free_list);
@@ -295,7 +297,7 @@ thread_worker (void *args)
       // It had to be placed intentionally because my CPU was hitting 100% and my computer would freeze.
       clock_gettime (CLOCK_MONOTONIC_RAW, &end_time);
       uint64_t delta_ms = timespec_diff_ms (start_time, end_time);
-      if (delta_ms >= PING_TIMEOUT * 1000)
+      if (delta_ms >= PING_TIMEOUT * 1000 / 2)
         break;
     }
   }

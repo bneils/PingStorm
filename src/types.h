@@ -20,8 +20,9 @@ enum TaskStatus {
 enum PingReason : uint8_t {
   P_UNKNOWN = 0,
   P_NOREPLY = 1,
-  P_REPLIED = 2,
-  P_PRIVATE = 3,
+  P_REPLIED1 = 2,
+  P_REPLIED2 = 3,
+  P_PRIVATE = 4,
 };
 
 /* The shared buffer holding all ping results */
