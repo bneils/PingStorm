@@ -40,39 +40,52 @@ const ipaddr special_subnets[17][2] = {
 };
 
 static struct {
-  int num_pings;
-  int num_reply1;
-  int num_reply2;
-  int num_failed;
+  int sent_count;
+  int done_count;
+  int reply_counts[MAX_REPLIES];
   time_t current_time;
   pthread_mutex_t lock;
 } throughput;
 
 void
-throughput_tick (enum PingReason reason)
+throughput_tick (int num_recv)
 {
+  ASSERT (0 <= num_recv && num_recv <= MAX_REPLIES);
+
   pthread_mutex_lock (&throughput.lock);
   time_t current_time = time (NULL);
 
-  throughput.num_pings += (reason == P_NOREPLY) ? 1 : 2;
+  throughput.sent_count += NUM_SENDS;
+  throughput.reply_counts[num_recv]++;
+  throughput.done_count++;
 
-  if (reason == P_NOREPLY) throughput.num_failed++;
-  else if (reason == P_REPLIED1) throughput.num_reply1++;
-  else if (reason == P_REPLIED2) throughput.num_reply2++;
-
-  if (current_time - throughput.current_time >= 10) {
+  if (current_time - throughput.current_time >= DEBUG_STATS_SECS) {
     int duration = (int)(current_time - throughput.current_time);
-    debug ("%d timed out/sec, %.1f/sec (1 reply), %.1f/sec (2 replies), total %d/sec",
-      throughput.num_failed / duration,
-      (float)throughput.num_reply1 / duration,
-      (float)throughput.num_reply2 / duration,
-      throughput.num_pings / duration
-    );
+    // Format the debug string
+    char dst[256];
+    int dst_size = sizeof (dst);
+    int num_written;
+    int pos = 0;
+    memset (dst, 0, dst_size);
+    for (int i = 0; i <= NUM_SENDS; ++i) {
+      num_written = snprintf (&dst[pos], dst_size, "%.1f/sec (%d replies), ",
+        (float)throughput.reply_counts[i] / duration, i);
+      ASSERT (num_written >= 0);
+      dst_size -= num_written;
+      pos += num_written;
+      ASSERT (dst_size >= 0);
+    }
+    // Add number of sends & finished
+    CHECK (0 > snprintf (&dst[pos], dst_size, "sent %.1f/sec, done %.1f/sec",
+      (float)throughput.sent_count / duration, (float)throughput.done_count / duration));
+
+    // Output it to terminal
+    debugstr (dst);
+
+    memset (throughput.reply_counts, 0, sizeof (throughput.reply_counts));
     throughput.current_time = current_time;
-    throughput.num_pings = 0;
-    throughput.num_failed = 0;
-    throughput.num_reply1 = 0;
-    throughput.num_reply2 = 0;
+    throughput.sent_count = 0;
+    throughput.done_count = 0;
   }
   pthread_mutex_unlock (&throughput.lock);
 }
@@ -81,10 +94,6 @@ void
 throughput_init (void)
 {
   throughput.current_time = time (NULL);
-  throughput.num_failed = 0;
-  throughput.num_pings = 0;
-  throughput.num_reply1 = 0;
-  throughput.num_reply2 = 0;
   pthread_mutex_init (&throughput.lock, NULL);
 }
 
@@ -201,11 +210,19 @@ thread_worker (void *args)
   struct worker_args *w = args;
   struct ping_task tasks[WORK_PER_THREAD];
   struct epoll_event event_queue[MAX_EPOLL_EVENTS];
-  struct list active_list, free_list;
+  struct list timeout_list, free_list, send_list;
   int epoll_fd;
   ipaddrl cur;
 
-  list_init (&active_list);
+  // send list is the list of tasks that need to be sent AGAIN by our worker.
+  // it is comprised of tasks that have been sent at least once and need to be sent again.
+  // think of it as the "chore" list.
+  list_init (&send_list);
+
+  // timeout list is checked for timeouts, consists of tasks in transit.
+  list_init (&timeout_list);
+
+  // free list is list of tasks not being used for anything.
   list_init (&free_list);
 
   ASSERT (WORK_PER_THREAD > 0);
@@ -213,7 +230,7 @@ thread_worker (void *args)
   // Pick starting point (which might take a while)
   cur = pings_next_unknown (w->begin, w->end);
   if (cur > UINT32_MAX) {
-    debug ("P_UNKNOWN not found in (%lX, %lX)", w->begin, w->end);
+    debug ("Work not found in (%lX, %lX)", w->begin, w->end);
     sem_post (&sem_worker_inited);
     return NULL;
   }
@@ -232,18 +249,12 @@ thread_worker (void *args)
     list_push_back (&free_list, &tasks[i].elem);
   }
 
-  // Initialize first task
-  struct ping_task *t = list_entry (list_pop_front (&free_list), struct ping_task, elem);
-  ping_task_assign (t, cur);
-  CHECK (0 > ping_task_advance (t));
-  list_push_back (&active_list, &t->elem);
-  // Advance the address cursor
-  cur = pings_next_unknown (cur + 1, w->end);
-
   while (cur <= UINT32_MAX) {
-    // Check for an socket events
-    if (list_empty (&active_list))
-      debug ("no tasks in queue");
+    // Print some debug about the task lists
+    if (list_empty (&timeout_list) && !list_empty (&send_list)) debug ("no tasks in transit (send list not empty)");
+    else if (list_empty (&timeout_list) && list_empty (&send_list)) debug ("no work in queue");
+
+    // The returned events might be for active or free tasks.
     int num_ready = epoll_wait (epoll_fd, event_queue, MAX_EPOLL_EVENTS, (PING_TIMEOUT + 1) * 1000);
 
     // Handle received events
@@ -254,29 +265,63 @@ thread_worker (void *args)
       ASSERT (event.events & EPOLLIN)
 
       struct ping_task *task = event.data.ptr;
-      CHECK (0 > ping_task_advance (task));
-      // Close this task.
-      if (task->status == T_DONE)
+
+      // Read the failure codes for task_recv,
+      // -1 if recv failed (which is probably an OS error)
+      // -2 if it was for a different task -- which means
+      // we are operating on an undefined object (could be in free / send lists)
+      if (0 > ping_task_recv (task))
+        continue;
+
+      // Task finished.
+      if (task->num_sent == NUM_SENDS) {
         ping_task_done (task, &free_list);
+        continue;
+      }
+
+      // Move the task to the send list
+      list_remove (&task->elem);
+      list_push_back (&send_list, &task->elem);
 		}
 
-    // Check for timeouts via the linked list
-    time_t now = time (NULL);
-    while (!list_empty (&active_list)) {
+    // Check for timeouts
+    while (!list_empty (&timeout_list)) {
       // Peek front of list
-      struct ping_task *task = list_entry (list_front (&active_list), struct ping_task, elem);
+      struct ping_task *task = list_entry (list_front (&timeout_list), struct ping_task, elem);
 
-      if (now < task->timeout_end)
+      if (0 > ping_task_timeout (task))
         break;
 
-      CHECK (0 > ping_task_advance (task));
-      ASSERT (task->status == T_DONE);
+      if (task->num_sent == NUM_SENDS) {
+        ping_task_done (task, &free_list);
+        continue;
+      }
 
-      ping_task_done (task, &free_list);
+      // Move the task to the send list
+      list_remove (&task->elem);
+      list_push_back (&send_list, &task->elem);
     }
 
     struct timespec start_time, end_time;
     clock_gettime (CLOCK_MONOTONIC_RAW, &start_time);
+
+    // Send the tasks in the send list.
+    int failed = 0;
+    while (!list_empty (&send_list)) {
+      struct ping_task *task = list_entry (list_front (&send_list), struct ping_task, elem);
+      // If this fails, we should stop
+      if (0 > ping_task_send (task)) {
+        failed = 1;
+        break;
+      }
+      // Send succeeded, now we are waiting for a response
+      list_remove (&task->elem);
+      list_push_back (&timeout_list, &task->elem);
+    }
+    // Don't proceed further, if the tasks in the send list failed (which are higher priority)
+    // then we shouldn't try sending more.
+    if (failed)
+      continue;
 
     // Add as many tasks as you can in the active list.
     // Skip drawing from the free list if we have no more tasks to make.
@@ -286,12 +331,12 @@ thread_worker (void *args)
       ping_task_assign (task, cur);
 
       // Stop if it fails
-      if (0 > ping_task_advance (task))
+      if (0 > ping_task_send (task))
         break;
 
       // If successful, we move it from the free list to the active list, then getting the next address.
       list_remove (&task->elem);
-      list_push_back (&active_list, &task->elem);
+      list_push_back (&timeout_list, &task->elem);
       cur = pings_next_unknown (cur + 1, w->end);
 
       // Only spend so much time in this loop.

@@ -1,4 +1,3 @@
-#include <asm-generic/errno.h>
 #include <string.h>
 #include <netinet/in.h>
 #include <netinet/ip_icmp.h>
@@ -17,21 +16,17 @@
 pthread_mutex_t ping_lock;
 uint8_t *pings;
 
+static void ping_task_erase (struct ping_task *t);
+
 uint64_t
 timespec_diff_ms (struct timespec start_time, struct timespec end_time) {
   return (end_time.tv_sec - start_time.tv_sec) * 1e3
     + (end_time.tv_nsec - start_time.tv_nsec) / 1e6;
 }
 
-uint16_t
-hash_ipaddr (ipaddr addr)
-{
-  return ((addr & 0xff00) >> 8) ^ (addr & 0xff);
-}
-
 /* Try sending an ICMP echo without blocking.
  * Returns 0 on success and -1 if send failed.
- * The function may fail if `wait` is false, but can also fail in other scenarios,
+ * The function may fail if `wait` is false, but can also fail in other scenarios (like network failure).
  * so the return code should always be handled by the caller.
  * This function signals system network congestion. */
 int
@@ -50,25 +45,27 @@ ping_send (int sock, ipaddr addr, bool wait)
   sock_addr.sin_family = AF_INET;
   sock_addr.sin_addr.s_addr = htonl (addr);
 
-  // Initialize the ICMP header
+  // Initialize the ICMP header (the rest is filled)
   memset (&icmp_hdr, 0, sizeof icmp_hdr);
   icmp_hdr.type = ICMP_ECHO;
-  icmp_hdr.un.echo.id = 0; // TODO: encode IP into this
-  icmp_hdr.un.echo.sequence = htons (hash_ipaddr (addr));
 
   // Initialize the packet data (header and payload)
   memcpy (packetdata, &icmp_hdr, sizeof icmp_hdr);
 
   // Send the packet; if it fails due to blocking then we retry but with the flag disabled.
-  if (0 > sendto (sock, packetdata, sizeof packetdata, (wait) ? 0 : MSG_DONTWAIT, (struct sockaddr *) &sock_addr, sizeof sock_addr)) {
+  int send_flag = (wait) ? 0 : MSG_DONTWAIT;
+  while (0 > sendto (sock, packetdata, sizeof (packetdata), send_flag,
+      (struct sockaddr *) &sock_addr, sizeof sock_addr))
     switch (errno) {
+    // If we get interrupted then we should re-try
+    case EINTR:
+      continue;
     // The usual culprit: the system warning us it would block (regardless of MSG_DONTWAIT)
     case EWOULDBLOCK:
     #if EAGAIN != EWOULDBLOCK
     case EAGAIN:
     #endif
-    // Other possible errors
-    case EINTR:
+    // System-related issues (like losing connectivity)
     case ECONNRESET:
     case ENOBUFS:
       errno = 0;
@@ -76,47 +73,27 @@ ping_send (int sock, ipaddr addr, bool wait)
     default:
       PANIC ("Bad");
     }
-  }
 
   return 0;
 }
 
-/* Advance a ping task to a different status (like T_DONE or T_SENT).
- * This is called whenever an event arrives for a task, or if a task timed out.
- * If a T_NOTSENT task fails, it will revert to T_NONE.
- * Returns 0 on successful advancement or -1 if it could not advance (T_NONE).
+/* Updates a task's number of received packets.
+ * Will retry on EINTR signal.
+ * Returns 0 if the count was incremented, -1 if send failed (OS error), or -2 if the task's address didn't match.
  */
 int
-ping_task_advance (struct ping_task *task)
+ping_task_recv (struct ping_task *task)
 {
-  if (task->status == T_NONE) return -1;
-  if (task->status == T_DONE) return 0;
-
-  if (task->status == T_NOTSENT) {
-    // Try to send the ping.
-    if (0 > ping_send (task->sock, task->addr, true))
-      return -1;
-    task->timeout_end = time (NULL) + PING_TIMEOUT;
-    task->status = T_SENT;
-    return 0;
-  }
-
-  // Shouldn't happen
-  if (task->status != T_SENT)
-    return 0;
-
-  // Handle timed out tasks
-  if (time (NULL) >= task->timeout_end) {
-    // Skip checking the socket if we know it has timed out
-    if (task->reason == P_UNKNOWN) task->reason = P_NOREPLY;
-    task->status = T_DONE;
-    return 0;
-  }
+  // We need to check if the received data matches the task's address.
+  // If not, then we should evaluate whether it is for a past task.
 
   // Try to read from the socket if it's not timed out
   char recv_buf[256];
+  struct sockaddr_in sender_saddr;
+  in_addr_t sender_addr;
+  socklen_t size = sizeof sender_saddr;
   for (;;) {
-    if (0 > recv (task->sock, recv_buf, sizeof recv_buf, MSG_DONTWAIT))
+    if (0 > recvfrom (task->sock, recv_buf, sizeof recv_buf, MSG_DONTWAIT, (struct sockaddr *) &sender_saddr, &size))
       switch (errno) {
       // Retry due to interrupt (curse you unix)
       case EINTR:
@@ -128,7 +105,7 @@ ping_task_advance (struct ping_task *task)
       #endif
       // Can be safely ignored
       case ECONNREFUSED:
-      return 0;
+      return -1;
       default:
         // Otherwise fatal errors
         PANIC ("recv");
@@ -136,28 +113,44 @@ ping_task_advance (struct ping_task *task)
     break;
   }
 
-  // We had a response waiting
-  struct icmphdr *icmp_hd = (void *)recv_buf;
-  ASSERT (icmp_hd->type == ICMP_ECHOREPLY)
-  // Try to check sequence no. / identification / source IP
-  if (icmp_hd->un.echo.sequence != htons (hash_ipaddr(task->addr))) {
-    debug ("ping address doesn't match: %X != %s", ntohs (icmp_hd->un.echo.sequence), ip_htos (task->addr));
-    return 0;
+  // Check source IP of received packet.
+  sender_addr = ntohl (sender_saddr.sin_addr.s_addr);
+  if (sender_addr != task->addr) {
+    pthread_mutex_lock (&ping_lock);
+    enum PingReason reason = pings[sender_addr];
+    if (P_REPLIED_0 <= reason && reason < P_REPLIED_MAX)
+      pings[sender_addr] = ++reason;
+    pthread_mutex_unlock (&ping_lock);
+    debug ("Received address %8x is not %8x: set to %d recv_count", task->addr, sender_addr, reason - P_REPLIED_0);
+    return -1;
   }
 
-  if (task->reason == P_UNKNOWN) {
-    // Don't stop the task if we only get 1 reply
-    for (int noretries = 3; noretries > 0; noretries--)
-      if (0 <= ping_send (task->sock, task->addr, true))
-        goto second_ping_sent;
-    PANIC ("failed after 3 tries");
-second_ping_sent:
-    task->reason = P_REPLIED1;
-    task->timeout_end = time (NULL) + PING_TIMEOUT;
-  } else if (task->reason == P_REPLIED1) {
-    task->reason = P_REPLIED2;
-    task->status = T_DONE;
-  }
+  task->num_recv++;
+  return 0;
+}
+
+/* Returns 0 if the task became timed out after this call. Returns -1 if the task is unchanged. */
+int
+ping_task_timeout (struct ping_task *task)
+{
+  // Handle timed out tasks
+  if (time (NULL) < task->timeout_end)
+    return -1;
+  return 0;
+}
+
+/* Send a task, increment its count, and reset its timeout.
+ * If send fails (due to conditions) it returns -1.
+ * Returns 0 on success.
+ */
+int
+ping_task_send (struct ping_task *task)
+{
+  // Try to send the ping.
+  if (0 > ping_send (task->sock, task->addr, true))
+    return -1;
+  task->num_sent++;
+  task->timeout_end = time (NULL) + PING_TIMEOUT;
   return 0;
 }
 
@@ -167,8 +160,8 @@ ping_task_init (struct ping_task *task, int epoll_fd)
 {
   ping_task_erase (task);
 
-  task->sock = socket (AF_INET, SOCK_DGRAM, IPPROTO_ICMP);
-  CHECK (0 > task->sock);
+  CHECK (0 > (task->sock = socket (AF_INET, SOCK_DGRAM, IPPROTO_ICMP)));
+
   // Increase TTL
   int ttl = UINT8_MAX;
   CHECK (0 > setsockopt (task->sock, IPPROTO_IP, IP_TTL, &ttl, sizeof ttl));
@@ -176,6 +169,7 @@ ping_task_init (struct ping_task *task, int epoll_fd)
   // Subscribe to events for this file descriptor
   struct epoll_event event;
   event.events = EPOLLIN;
+
   // This union can only store 1 piece of metadata
   event.data.ptr = task;
   CHECK (0 > epoll_ctl (epoll_fd, EPOLL_CTL_ADD, task->sock, &event));
@@ -193,22 +187,23 @@ void
 ping_task_assign (struct ping_task *task, ipaddr addr)
 {
   task->addr = addr;
-  task->status = T_NOTSENT;
-  task->reason = P_UNKNOWN;
+  task->num_sent = 0;
+  task->num_recv = 0;
 }
 
 /* Takes a finished ping task and cleans up: removes it from the list and writes to disk.
+ * After this call, the task will be in the free list.
  */
 void
 ping_task_done (struct ping_task *task, struct list *free_list)
 {
-  ASSERT (task->status == T_DONE);
+  ASSERT (task->num_sent == NUM_SENDS);
 
-  throughput_tick (task->reason);
+  throughput_tick (task->num_recv);
 
   // Write to memory-mapped region
   pthread_mutex_lock (&ping_lock);
-  pings[task->addr] = task->reason;
+  pings[task->addr] = P_REPLIED_0 + task->num_recv;
   pthread_mutex_unlock (&ping_lock);
 
   // Remove task from its list
@@ -216,8 +211,6 @@ ping_task_done (struct ping_task *task, struct list *free_list)
 
   // Put them back onto their respective lists
   list_push_back (free_list, &task->elem);
-
-  task->status = T_NONE;
 }
 
 /* Gives a string from an IPv4 address. Cannot be used recursively or ephemerally. Thread-safe. */
@@ -230,8 +223,8 @@ ip_htos(ipaddr addr)
   return inet_ntoa (in_addr);
 }
 
-/* set the object to an empty / nil state */
-void
+/* set the object to an empty / nil state. Should NOT be used by other functions. */
+static void
 ping_task_erase (struct ping_task *t)
 {
   memset (t, 0, sizeof (*t));

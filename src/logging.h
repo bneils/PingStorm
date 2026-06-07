@@ -9,8 +9,10 @@
 
 #if DEBUG
 #define debug(fmt, ...) printf ("(tid %lu) " fmt "\n", pthread_self () __VA_OPT__(,) __VA_ARGS__)
+#define debugstr(buf) printf ("(tid %lu) %s\n", pthread_self (), buf)
 #else
 #define debug(fmt, ...)
+#define debugstr(buf)
 #endif
 
 #define ASSERT(expr) if (!(expr)) PANIC ("ASSERT(" #expr ")")

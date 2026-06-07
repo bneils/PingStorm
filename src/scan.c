@@ -81,15 +81,16 @@ ping_file_open (void)
     }
 
     msync (pings, IPV4_SIZE, MS_SYNC);
-
-    // Verify regions are OK
-    debug ("Validating P_PRIVATE regions thoroughly");
-    for (uint64_t a = 0; a <= UINT32_MAX; ++a) {
-      bool actual = (P_PRIVATE == pings[a]);
-      bool expected = is_special (a) ? true : false;
-      ASSERT (actual == expected);
-    }
   }
+  #ifdef CHECK_RESERVED
+  // Verify regions are OK
+  debug ("Validating P_PRIVATE regions thoroughly");
+  for (uint64_t a = 0; a <= UINT32_MAX; ++a) {
+    bool actual = (P_PRIVATE == pings[a]);
+    bool expected = is_special (a) ? true : false;
+    ASSERT (actual == expected);
+  }
+  #endif
 }
 
 /* Cleanup allocated resources properly before closing. */
