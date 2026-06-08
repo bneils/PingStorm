@@ -8,35 +8,12 @@
 #include <sys/resource.h>
 
 #include "logging.h"
-#include "list.h"
 #include "ping.h"
-#include "types.h"
 #include "worker.h"
 #include "title.h"
 
-#define NUM_FD_REQUIRED (NUM_THREADS * WORK_PER_THREAD * 5 / 4)
-
 // Descriptor for opened ping file
 static int ping_fd;
-
-/* Increase file limits of the process to allow for large number of sockets. */
-void
-set_rlimits (void)
-{
-  struct rlimit limits;
-  if (0 > getrlimit (RLIMIT_NOFILE, &limits))
-    err (EXIT_FAILURE, "getrlimit");
-  if (limits.rlim_max < NUM_FD_REQUIRED) {
-    fprintf(stderr, "The hard file descriptor limit is too low. %lu < %u\n", limits.rlim_max, NUM_FD_REQUIRED);
-    exit (1);
-  }
-  if (limits.rlim_cur < NUM_FD_REQUIRED) {
-    limits.rlim_cur = limits.rlim_max;
-    if (0 > setrlimit (RLIMIT_NOFILE, &limits))
-      err (EXIT_FAILURE, "setrlimit");
-    debug ("Set soft limit to %lu", limits.rlim_cur);
-  }
-}
 
 /* sets ping_fd and backs the `pings` pointer to the file contents. */
 void
@@ -78,7 +55,7 @@ ping_file_open (void)
       network = special_subnets[i][0];
       netmask = special_subnets[i][1];
       debug ("%x %x", network, netmask);
-      memset (&pings[network], P_PRIVATE, ~netmask + 1);
+      memset (&pings[network], P_PRIVATE | P_DONE, ~netmask + 1);
     }
 
     msync (pings, IPV4_SIZE, MS_SYNC);
@@ -87,8 +64,8 @@ ping_file_open (void)
   // Verify regions are OK
   debug ("Validating P_PRIVATE regions thoroughly");
   for (uint64_t a = 0; a <= UINT32_MAX; ++a) {
-    bool actual = (P_PRIVATE == pings[a]);
-    bool expected = is_special (a) ? true : false;
+    bool actual = (P_PRIVATE & pings[a]) != 0;
+    bool expected = is_special (a) != 0;
     ASSERT (actual == expected);
   }
   #endif
@@ -112,7 +89,6 @@ main (void)
     PERROR ("get_titlecard");
   else
     printf ("%s\n%s\n\n%s\n\n", title, attr, TITLE_WEBSITE_ATTRIBUTION);
-  set_rlimits ();
   ping_file_open ();
   start_workers ();
   cleanup ();

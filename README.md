@@ -1,13 +1,27 @@
 # IPv4 ping map
-This project aims to create an image of the global IPv4 address space using just pings. As you can imagine this is quite hard with $2^{32}$ or 4.2 billion pixels that have to be individually pinged.
+This program gathers IPv4 ICMP echo response data that may be used to create a heatmap of the global IPv4 address space.
+Such an image would contain $2^{32}$ or 4.2 billion pixels.
 
-What drew me to the project isn't that it has never been done before.
-Obviously, plenty of individuals and organizations have done it before (The internet has been around for decades). Instead, I wanted to put my programming skills to the test and also learn OS libraries like `pthread`, `epoll`, `mmap`, and `sockets`.
+## Limitations
+Firstly, it is very important to recognize that ICMP is a connection-less datagram protocol which doesn't have the
+guarantees that connection-oriented protocols have. There is no delivery guarantee and importantly no congestion control
+or notification system. We won't receive messages to slow down our transmits and therefore our only notice that something
+is wrong is when we stop receiving replies. There is no best way to detect this perfectly, but a good way seems to be: send 3 pings and
+see how many addresses come back with only 1 response. If the number is high then packets are being dropped.
 
-No GenAI was used in the making of this.
+The kind of traffic this program sends is largely control plane. Each IP packet has 8 bytes of payload (size of ICMP header),
+which is less than half the size of the header itself. Due to this, our bottleneck is going to be largely CPU-based, which
+for most off-the-shelf routers, means its actual throughput is much lower than what it could achieve in theory.
 
-## Some challenges
-1. Creating that many sockets quickly balloons and hits the OS's user "soft limit". This is because it treats open network sockets as files and assigns a file descriptor to each. To fix this, I simply raise the ceiling at runtime.
-2. Having a lot of threads open and a lot of data to write meant I needed a simple way of writing. I used the `mmap` interface to back the 4 GB file to a shared pointer protected by a mutex. 
-3. Reserved / private subnets. Almost a tenth of the global IPv4 routable space is reserved. The largest region of it is pretty much just multicast. I converted the subnets from Wikipedia to hex with a script, then used `memset` to fill those areas in with a constant in the ping file and also skipped over them in my code.
-4. Task management being a problem became obvious when I had to ask how I was going to manage 10k sockets (known as the 10k problem). My first thought was to  have several threads checking a list of sockets one-by-one. That was slow. I then wandered onto the `poll` function and eventually the superior `epoll` (paired with non-blocking sockets). My code gets the exact descriptors that received data. It also keeps a linked list of active sockets for timeout purposes that it checks in $O(1)$ time. I have no idea it is better than any other event-driven or async framework.
+## How it works
+A socket is created with the `SOCK_DGRAM` and `IPPROTO_ICMP` options which requires your user to be in the range of `net.ipv4.ping_group_range`.
+Two threads send and receive on this socket. The first sends `DATAGRAMS_PER_SEC` packets/sec and pings each IP address at least 3 times.
+The second thread listens for any packets that arrive and marks them down in a memory-mapped file using bitwise arithmetic.
+
+Regions marked as [reserved](https://en.wikipedia.org/wiki/IPv4#Special-use_addresses) are skipped over in the program.
+
+To stop the program, common Unix signals to terminate a process are caught and flip a flag that the threads will use to stop executing early.
+
+## Resources
+I included citations to code where I deemed worthy. The rest comes from my university courses in systems and socket programming.
+GenAI was not used to write any code for this program.

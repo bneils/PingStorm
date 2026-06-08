@@ -3,43 +3,38 @@
 
 #include <stdint.h>
 #include <time.h>
-#include <sys/epoll.h>
-#include <stdbool.h>
-
-#include "types.h"
-#include "list.h"
+#include <pthread.h>
 
 #define PING_FILENAME "ping.dat"
-#define PING_TIMEOUT 10
+#define PING_TIMEOUT 5
 
-#define FITS_IPV4(ip) (ip <= UINT32_MAX)
+#define MIN_U8_SHIFT 2
+#define MAX_U8_SHIFT 7
+
+#define MIN_SEQ 0
+#define MAX_SEQ (MAX_U8_SHIFT - MIN_U8_SHIFT)
+#define MAX_REPLIES (MAX_U8_SHIFT - MIN_U8_SHIFT + 1)
+
+#define IPV4_SIZE (1ULL << 32)
+
+#define P_DONE     1       /* This ping is complete. */
+#define P_PRIVATE  2       /* The address is private, reserved, and not routable. */
+
+// Perform a bounds check before using this.
+#define SEQ_TO_BIT(seq) (1 << ((seq) + MIN_U8_SHIFT))
 
 extern pthread_mutex_t ping_lock;
 extern uint8_t *pings;
 
-struct ping_task {
-  int num_sent;
-  int num_recv;
-  enum PingReason reason; // What gets written to disk.
-  ipaddr addr;
-  int sock;
-  time_t timeout_end;
-  struct list_elem elem;
-};
-
-uint64_t timespec_diff_ms (struct timespec start_time, struct timespec end_time);
+typedef uint32_t ipaddr;
+typedef uint64_t ipaddrl;
 
 char *ip_ntoa (ipaddr addr);
 
-int ping_send (struct ping_task *task, bool wait);
-void ping_task_done (struct ping_task *task, struct list *free_list);
-void ping_task_init (struct ping_task *task, int epoll_fd);
-void ping_task_destroy (struct ping_task *task, int epoll_fd);
-void ping_task_assign (struct ping_task *task, ipaddr addr);
-
-int ping_task_recv (struct ping_task *task);
-int ping_task_timeout (struct ping_task *task);
-int ping_task_send (struct ping_task *task);
+int ping_send (int sock, ipaddr addr, int seq);
+int ping_recv (int sock);
+int socket_create (void);
+int count_replies (int bits);
 
 void ping_init (void);
 

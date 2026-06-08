@@ -15,7 +15,7 @@
 #define debugstr(buf)
 #endif
 
-#define WARN (expr) if (expr) PERROR (msg);
+#define WARN(expr) if (expr) PERROR ("WARN(" #expr ")");
 #define ASSERT(expr) if (!(expr)) PANIC ("ASSERT(" #expr ")")
 #define CHECK(expr) if (expr) PANIC ("CHECK(" #expr ")")
 #define PANIC(msg) { \
@@ -27,5 +27,7 @@
   fprintf (stderr, "(tid %lu) %s:%d %s: %s (%d)\n", \
     pthread_self (), __FILE__, __LINE__, (msg), \
     (errno) ? strerror (errno) : "panic", errno)
+
+#define CLEN(arr) (sizeof (arr) / sizeof (*arr))
 
 #endif

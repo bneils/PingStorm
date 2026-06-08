@@ -4,7 +4,6 @@
 #include <stdlib.h>
 #include <time.h>
 
-#include "types.h"
 #include "title.h"
 #include "logging.h"
 

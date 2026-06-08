@@ -9,10 +9,8 @@
 #include <signal.h>
 
 #include "worker.h"
-#include "list.h"
 #include "logging.h"
 #include "ping.h"
-#include "types.h"
 
 // This resource is increased when the main thread has collected messages
 // from all threads that they are initialized.
@@ -46,6 +44,7 @@ const ipaddr special_subnets[17][2] = {
 static void register_handler (void);
 static void sig_handler (int sig);
 static void print_stop_msg (void);
+static void sleep_until (struct timespec *t);
 
 /* set by signal handler; informs workers to stop execution. */
 static volatile sig_atomic_t stop_working;
@@ -57,6 +56,12 @@ static struct {
   time_t current_time;
   pthread_mutex_t lock;
 } throughput;
+
+struct sender_task {
+  int num_sent;
+  ipaddr addr;
+  struct timespec time_next;
+};
 
 void
 throughput_tick (int num_recv)
@@ -149,11 +154,11 @@ skip_special (ipaddrl addr)
   return addr;
 }
 
-void *
-mem_find (uint8_t *p, uint8_t *end, uint8_t value)
+uint8_t *
+mem_find_not_done(uint8_t *p, uint8_t *end)
 {
   for (; p < end; ++p)
-    if (*p == value)
+    if ((*p & P_DONE) == 0)
       return p;
   return NULL;
 }
@@ -166,26 +171,13 @@ pings_next_unknown (ipaddrl addr, ipaddrl end)
     return addr;
 
   void *endp = &pings[end + 1];
+  uint8_t *ptr;
 
   pthread_mutex_lock (&ping_lock);
-  while (pings[addr] != P_UNKNOWN) {
-    uint8_t *p = mem_find (&pings[addr], endp, P_UNKNOWN);
-    // not found in current range.
-    if (!p) {
-      addr = 1UL << 32;
-      break;
-    }
-    // avoid landing in special ranges (e.g multicast)
-    // if this region puts us past our `end` then we should stop here
-    addr = skip_special (p - pings);
-    if (addr > end) {
-      addr = 1UL << 32;
-      break;
-    }
-  }
+  ptr = mem_find_not_done (&pings[addr], endp);
   pthread_mutex_unlock (&ping_lock);
 
-  return addr;
+  return (ptr) ? (ipaddrl)(ptr - pings) : 1UL << 32;
 }
 
 static void
@@ -212,14 +204,144 @@ register_handler (void)
     CHECK (0 > sigaction (signals[i], &act, NULL));
 }
 
+static void
+sleep_until (struct timespec *t)
+{
+  struct timespec now;
+  clock_gettime (CLOCK_MONOTONIC_RAW, &now);
+  // Calculate difference between now and wakeup time
+  struct timespec diff = {
+    .tv_sec = t->tv_sec - now.tv_sec,
+    .tv_nsec = t->tv_nsec - now.tv_nsec,
+  };
+  if (diff.tv_nsec < 0) {
+    diff.tv_sec--;
+    diff.tv_nsec += (long)1e9;
+  }
+
+  if (diff.tv_sec < 0)
+    return;
+
+  // Sleep for at least that amount of time
+  while (0 > nanosleep (&diff, &diff))
+    ;
+}
+
+void *
+start_sender (void *ptr)
+{
+  struct sender_task tasks[DATAGRAMS_PER_SEC * PING_TIMEOUT * 2];
+  ipaddrl current;
+  int sock;
+
+  memset (tasks, 0, sizeof tasks);
+  sock = *(int *)ptr;
+
+  current = pings_next_unknown (0, UINT32_MAX);
+  if (current > UINT32_MAX) {
+    debug ("Nothing to send");
+    sem_post (&sem_worker_inited);
+    return NULL;
+  }
+
+  sem_post (&sem_worker_inited);
+  sem_wait (&sem_worker_begin);
+
+  debug ("Send thread started at %s", ip_ntoa (current));
+
+  int open_tasks = CLEN (tasks);
+  for (;;) {
+    for (size_t i = 0; i < CLEN (tasks); ++i) {
+      struct sender_task *t = &tasks[i];
+
+      if (stop_working)
+        return NULL;
+
+      // This task was given a time it could until finishing
+      if (t->num_sent > 0)
+        sleep_until (&t->time_next);
+
+      // Task has no more sends, we mark it as "done"
+      if (t->num_sent == NUM_SENDS) {
+        int num_replies;
+        pthread_mutex_lock (&ping_lock);
+        num_replies = count_replies (pings[t->addr]);
+        // Depending on number of replies, we can choose to invalidate this result and instead retry.
+        if (num_replies > 1) {
+          pings[t->addr] |= P_DONE;
+          open_tasks++;
+        } else {
+          pings[t->addr] = 0;
+        }
+        pthread_mutex_unlock (&ping_lock);
+
+        if (num_replies > 1)
+          throughput_tick (num_replies);
+        t->num_sent = 0;
+      }
+
+      // num_sent indicates the task is free, we assign to it if we're not done
+      if (open_tasks > 0) {
+        ASSERT (t->num_sent == 0);
+        if (current > UINT32_MAX)
+          continue;
+        open_tasks--;
+        t->addr = current;
+        pthread_mutex_lock (&ping_lock);
+        pings[t->addr] = 0;
+        pthread_mutex_unlock (&ping_lock);
+        current = pings_next_unknown(current + 1, UINT32_MAX);
+      }
+
+      // Send the ping and reset the cooldown
+      int seq = t->num_sent;
+      while (0 > ping_send (sock, t->addr, seq)) {
+        // Not much we can do if this fails besides just wait and retry
+        PERROR ("ping_send");
+        sleep (5);
+      }
+
+      clock_gettime (CLOCK_MONOTONIC_RAW, &t->time_next);
+      t->time_next.tv_sec += PING_TIMEOUT;
+      t->num_sent++;
+
+      // Wait to match DATAGRAMS_PER_SEC.
+      struct timespec ts = { 0 };
+      ts.tv_nsec = 1e9 / DATAGRAMS_PER_SEC;
+      while (0 > nanosleep (&ts, &ts))
+        ;
+    }
+
+    // Terminal condition
+    if (current > UINT32_MAX && open_tasks == CLEN (tasks))
+      break;
+  }
+
+  return NULL;
+}
+
+void *
+start_receiver (void *ptr)
+{
+  int sock;
+  sock = *(int *)ptr;
+
+  sem_post (&sem_worker_inited);
+  sem_wait (&sem_worker_begin);
+
+  debug ("Receive thread started");
+
+  while (!stop_working)
+    ping_recv (sock);
+  return NULL;
+}
+
 /* Create a large number of threads to start working on network requests. */
 void
 start_workers (void)
 {
-  struct worker_args w_args[NUM_THREADS];
-  pthread_t tids[NUM_THREADS];
-  size_t addrs_per_thread = (1ULL << 32) / NUM_THREADS;
-  ipaddr start = 0;
+  pthread_t tids[2];
+  int sock;
 
   // Initially 0 since all workers need permission
   sem_init (&sem_worker_begin, 0, 0);
@@ -229,34 +351,25 @@ start_workers (void)
 
   ping_init ();
   register_handler ();
+  CHECK (0 > (sock = socket_create ()));
 
-  for (int i = 0; i < NUM_THREADS; ++i) {
-    struct worker_args *arg = &w_args[i];
-    arg->begin = start;
-    // Make sure the last thread has no off-by-one error or overflow in the stop address.
-    arg->end = (i < NUM_THREADS - 1) ? start + addrs_per_thread - 1 : UINT32_MAX;
-    start += addrs_per_thread;
-    pthread_create (&arg->tid, NULL, thread_worker, arg);
-    tids[i] = arg->tid;
-  }
-
-  // Wait for all workers to post the inited thread.
-  for (int i = 0; i < NUM_THREADS; ++i)
-    sem_wait (&sem_worker_inited);
-
-  debug ("All threads ready");
   throughput_init ();
 
-  // Let all workers leave initialization phase
-  for (int i = 0; i < NUM_THREADS; ++i)
-    sem_post (&sem_worker_begin);
+  // Ensure that the receiver starts before the sender
+  pthread_create (&tids[0], NULL, start_receiver, &sock);
+  sem_wait (&sem_worker_inited);
+  sem_post (&sem_worker_begin);
+  pthread_create (&tids[1], NULL, start_sender, &sock);
+  sem_wait (&sem_worker_inited);
+  sem_post (&sem_worker_begin);
 
   // Wait until all threads exit
   struct timespec ts = {
     .tv_sec = 0,
     .tv_nsec = (int)1e9 / 2, // .5s
   };
-  for (int i = 0; i < NUM_THREADS; ++i) {
+
+  for (int i = 0; i < 2; ++i) {
     int err;
     // If the stop message is detected, print it.
     // This is something the main thread will do as it can execute in short intervals,
@@ -265,167 +378,4 @@ start_workers (void)
       print_stop_msg ();
   }
   print_stop_msg ();
-}
-
-void *
-thread_worker (void *args)
-{
-  struct worker_args *w = args;
-  struct ping_task tasks[WORK_PER_THREAD];
-  struct epoll_event event_queue[MAX_EPOLL_EVENTS];
-  struct list timeout_list, free_list, send_list;
-  int epoll_fd;
-  ipaddrl cur;
-
-  // send list is the list of tasks that need to be sent AGAIN by our worker.
-  // it is comprised of tasks that have been sent at least once and need to be sent again.
-  // think of it as the "chore" list.
-  list_init (&send_list);
-
-  // timeout list is checked for timeouts, consists of tasks in transit.
-  list_init (&timeout_list);
-
-  // free list is list of tasks not being used for anything.
-  list_init (&free_list);
-
-  ASSERT (WORK_PER_THREAD > 0);
-
-  char begin_addr_s[32];
-  char end_addr_s[32];
-  strncpy (begin_addr_s, ip_ntoa (w->begin), sizeof (begin_addr_s) - 1);
-  strncpy (end_addr_s, ip_ntoa (w->end), sizeof (end_addr_s) - 1);
-  begin_addr_s[sizeof (begin_addr_s) - 1] = '\0';
-  end_addr_s[sizeof (end_addr_s) - 1] = '\0';
-
-  // Pick starting point (which might take a while)
-  cur = pings_next_unknown (w->begin, w->end);
-  if (cur > UINT32_MAX) {
-    debug ("Work not found in (%s, %s)", begin_addr_s, end_addr_s);
-    sem_post (&sem_worker_inited);
-    return NULL;
-  }
-  debug ("Starting at %-15s (%s, %s)", ip_ntoa (cur), begin_addr_s, end_addr_s);
-  // Post when you've found your starting point
-  sem_post (&sem_worker_inited);
-  // Wait for main thread to signal readiness
-  sem_wait (&sem_worker_begin);
-
-  // Create an epoll object
-  CHECK (0 > (epoll_fd = epoll_create1 (0)));
-
-  // Fill the dead list which can be drawn from to create new tasks.
-  for (int i = 0; i < WORK_PER_THREAD; ++i) {
-    ping_task_init (&tasks[i], epoll_fd);
-    list_push_back (&free_list, &tasks[i].elem);
-  }
-
-  int ignore_empty_warning = 1;
-  while (cur <= UINT32_MAX && !stop_working) {
-    // Print some debug about the task lists
-    if (!ignore_empty_warning) {
-      if (list_empty (&timeout_list) && !list_empty (&send_list)) debug ("Mo tasks in transit (send list not empty)");
-      else if (list_empty (&timeout_list) && list_empty (&send_list)) debug ("No work in queue");
-      ignore_empty_warning = 0;
-    }
-
-    // The returned events might be for active or free tasks.
-    int num_ready = epoll_wait (epoll_fd, event_queue, MAX_EPOLL_EVENTS, (PING_TIMEOUT + 1) * 1000);
-
-    // Handle received events
-    for (int i = 0; i < num_ready; i++) {
-      struct epoll_event event = event_queue[i];
-
-      // epoll_ctl(2)
-      ASSERT (event.events & EPOLLIN)
-
-      struct ping_task *task = event.data.ptr;
-
-      // Read the failure codes for task_recv,
-      // -1 if recv failed (which is probably an OS error)
-      // -2 if it was for a different task -- which means
-      // we are operating on an undefined object (could be in free / send lists)
-      if (0 > ping_task_recv (task))
-        continue;
-
-      // Task finished.
-      if (task->num_sent == NUM_SENDS) {
-        ping_task_done (task, &free_list);
-        continue;
-      }
-
-      // Move the task to the send list
-      list_remove (&task->elem);
-      list_push_back (&send_list, &task->elem);
-		}
-
-    // Check for timeouts
-    while (!list_empty (&timeout_list)) {
-      // Peek front of list
-      struct ping_task *task = list_entry (list_front (&timeout_list), struct ping_task, elem);
-
-      if (0 > ping_task_timeout (task))
-        break;
-
-      if (task->num_sent == NUM_SENDS) {
-        ping_task_done (task, &free_list);
-        continue;
-      }
-
-      // Move the task to the send list
-      list_remove (&task->elem);
-      list_push_back (&send_list, &task->elem);
-    }
-
-    struct timespec start_time, end_time;
-    clock_gettime (CLOCK_MONOTONIC_RAW, &start_time);
-
-    // Send the tasks in the send list.
-    int failed = 0;
-    while (!list_empty (&send_list)) {
-      struct ping_task *task = list_entry (list_front (&send_list), struct ping_task, elem);
-      // If this fails, we should stop
-      if (0 > ping_task_send (task)) {
-        failed = 1;
-        break;
-      }
-      // Send succeeded, now we are waiting for a response
-      list_remove (&task->elem);
-      list_push_back (&timeout_list, &task->elem);
-    }
-    // Don't proceed further, if the tasks in the send list failed (which are higher priority)
-    // then we shouldn't try sending more.
-    if (failed)
-      continue;
-
-    // Add as many tasks as you can in the active list.
-    // Skip drawing from the free list if we have no more tasks to make.
-    while (cur <= UINT32_MAX && !list_empty (&free_list)) {
-      // Try initiating the next task
-      struct ping_task *task = list_entry (list_front (&free_list), struct ping_task, elem);
-      ping_task_assign (task, cur);
-
-      // Stop if it fails
-      if (0 > ping_task_send (task))
-        break;
-
-      // If successful, we move it from the free list to the active list, then getting the next address.
-      list_remove (&task->elem);
-      list_push_back (&timeout_list, &task->elem);
-      cur = pings_next_unknown (cur + 1, w->end);
-
-      // Only spend so much time in this loop.
-      // These few lines actually reduce CPU usage and increase throughput dramatically.
-      // It had to be placed intentionally because my CPU was hitting 100% and my computer would freeze.
-      clock_gettime (CLOCK_MONOTONIC_RAW, &end_time);
-      uint64_t delta_ms = timespec_diff_ms (start_time, end_time);
-      if (delta_ms >= PING_TIMEOUT * 1000 / 2)
-        break;
-    }
-  }
-  // Free the opened sockets
-  for (size_t i = 0; i < CLEN (tasks); ++i)
-    ping_task_destroy (&tasks[i], epoll_fd);
-  if (!stop_working)
-    debug ("Finished work load");
-  return NULL;
 }
