@@ -12,6 +12,7 @@
 #include "ping.h"
 #include "types.h"
 #include "worker.h"
+#include "title.h"
 
 #define NUM_FD_REQUIRED (NUM_THREADS * WORK_PER_THREAD * 5 / 4)
 
@@ -106,6 +107,11 @@ cleanup (void)
 int
 main (void)
 {
+  const char *title, *attr;
+  if (0 > get_titlecard(&title, &attr))
+    PERROR ("get_titlecard");
+  else
+    printf ("%s\n%s\n\n%s\n\n", title, attr, TITLE_WEBSITE_ATTRIBUTION);
   set_rlimits ();
   ping_file_open ();
   start_workers ();

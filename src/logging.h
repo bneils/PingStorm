@@ -15,11 +15,17 @@
 #define debugstr(buf)
 #endif
 
+#define WARN (expr) if (expr) PERROR (msg);
 #define ASSERT(expr) if (!(expr)) PANIC ("ASSERT(" #expr ")")
 #define CHECK(expr) if (expr) PANIC ("CHECK(" #expr ")")
 #define PANIC(msg) { \
-  fprintf (stderr, "(tid %lu) %s:%d %s: %s (%d)\n", pthread_self (), __FILE__, __LINE__, (msg), (errno) ? strerror (errno) : "panic", errno); \
+  PERROR (msg); \
   exit (EXIT_FAILURE); \
 }
+
+#define PERROR(msg) \
+  fprintf (stderr, "(tid %lu) %s:%d %s: %s (%d)\n", \
+    pthread_self (), __FILE__, __LINE__, (msg), \
+    (errno) ? strerror (errno) : "panic", errno)
 
 #endif

@@ -227,14 +227,19 @@ thread_worker (void *args)
 
   ASSERT (WORK_PER_THREAD > 0);
 
+  char begin_addr_s[32];
+  char end_addr_s[32];
+  strncpy (begin_addr_s, ip_ntoa (w->begin), sizeof (begin_addr_s));
+  strncpy (end_addr_s, ip_ntoa (w->end), sizeof (end_addr_s));
+
   // Pick starting point (which might take a while)
   cur = pings_next_unknown (w->begin, w->end);
   if (cur > UINT32_MAX) {
-    debug ("Work not found in (%lX, %lX)", w->begin, w->end);
+    debug ("Work not found in (%s, %s)", begin_addr_s, end_addr_s);
     sem_post (&sem_worker_inited);
     return NULL;
   }
-  debug ("Starting at %-15s (%8lX, %8lX)", ip_htos (cur), w->begin, w->end);
+  debug ("Starting at %-15s (%s, %s)", ip_ntoa (cur), begin_addr_s, end_addr_s);
   // Post when you've found your starting point
   sem_post (&sem_worker_inited);
   // Wait for main thread to signal readiness

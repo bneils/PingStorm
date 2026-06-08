@@ -30,7 +30,7 @@ timespec_diff_ms (struct timespec start_time, struct timespec end_time) {
  * so the return code should always be handled by the caller.
  * This function signals system network congestion. */
 int
-ping_send (int sock, ipaddr addr, bool wait)
+ping_send (struct ping_task *task, bool wait)
 {
   // Source: https://sturmflut.github.io/linux/ubuntu/2015/01/17/unprivileged-icmp-sockets-on-linux/
   // This helped me with the socket creation, though I've used my own before.
@@ -38,23 +38,25 @@ ping_send (int sock, ipaddr addr, bool wait)
   struct icmphdr icmp_hdr;
   char packetdata[sizeof icmp_hdr];
 
-  CHECK (sock < 0);
+  CHECK (task->sock < 0);
 
   // Initialize the destination address
   memset (&sock_addr, 0, sizeof sock_addr);
   sock_addr.sin_family = AF_INET;
-  sock_addr.sin_addr.s_addr = htonl (addr);
+  sock_addr.sin_addr.s_addr = htonl (task->addr);
 
   // Initialize the ICMP header (the rest is filled)
   memset (&icmp_hdr, 0, sizeof icmp_hdr);
   icmp_hdr.type = ICMP_ECHO;
+  ASSERT (MIN_SEQ <= task->num_sent && task->num_sent <= MAX_SEQ);
+  icmp_hdr.un.echo.sequence = task->num_sent;
 
   // Initialize the packet data (header and payload)
   memcpy (packetdata, &icmp_hdr, sizeof icmp_hdr);
 
   // Send the packet; if it fails due to blocking then we retry but with the flag disabled.
   int send_flag = (wait) ? 0 : MSG_DONTWAIT;
-  while (0 > sendto (sock, packetdata, sizeof (packetdata), send_flag,
+  while (0 > sendto (task->sock, packetdata, sizeof (packetdata), send_flag,
       (struct sockaddr *) &sock_addr, sizeof sock_addr))
     switch (errno) {
     // If we get interrupted then we should re-try
@@ -79,7 +81,9 @@ ping_send (int sock, ipaddr addr, bool wait)
 
 /* Updates a task's number of received packets.
  * Will retry on EINTR signal.
- * Returns 0 if the count was incremented, -1 if send failed (OS error), or -2 if the task's address didn't match.
+ * Returns 0 if the count was incremented, -1 if recv failed (OS error),
+ * or -2 if the received counter was NOT incremented, due to the
+ * task's address not matching OR the received packet being a duplicate.
  */
 int
 ping_task_recv (struct ping_task *task)
@@ -88,45 +92,83 @@ ping_task_recv (struct ping_task *task)
   // If not, then we should evaluate whether it is for a past task.
 
   // Try to read from the socket if it's not timed out
-  char recv_buf[256];
+  // This needs to be large enough to handle all datagrams.
+  char recv_buf[1024];
+  int recv_len;
   struct sockaddr_in sender_saddr;
   in_addr_t sender_addr;
   socklen_t size = sizeof sender_saddr;
-  for (;;) {
-    if (0 > recvfrom (task->sock, recv_buf, sizeof recv_buf, MSG_DONTWAIT, (struct sockaddr *) &sender_saddr, &size))
-      switch (errno) {
-      // Retry due to interrupt (curse you unix)
-      case EINTR:
-        continue;
-      // Allow errors due to non-blocking mode
-      case EAGAIN:
-      #if EAGAIN != EWOULDBLOCK
-      case EWOULDBLOCK:
-      #endif
-      // Can be safely ignored
-      case ECONNREFUSED:
+  struct icmphdr *hdr;
+  int seq;
+retry:
+  recv_len = recvfrom (task->sock, recv_buf, sizeof recv_buf, MSG_DONTWAIT, (struct sockaddr *) &sender_saddr, &size);
+  if (recv_len < 0)
+    switch (errno) {
+    // Retry due to interrupt (curse you unix)
+    case EINTR:
+      goto retry;
+    // Allow errors due to non-blocking mode
+    case EAGAIN:
+    #if EAGAIN != EWOULDBLOCK
+    case EWOULDBLOCK:
+    #endif
+    // Can be safely ignored
+    case ECONNREFUSED:
+      debug ("recv failed despite event: %s", strerror (errno));
       return -1;
-      default:
-        // Otherwise fatal errors
-        PANIC ("recv");
-      }
-    break;
-  }
+    default:
+      // Otherwise fatal errors
+      PANIC ("recv");
+    }
+
+  hdr = (void *)recv_buf;
+  seq = hdr->un.echo.sequence;
+  ASSERT (hdr->type == ICMP_ECHOREPLY);
 
   // Check source IP of received packet.
   sender_addr = ntohl (sender_saddr.sin_addr.s_addr);
-  if (sender_addr != task->addr) {
-    pthread_mutex_lock (&ping_lock);
-    enum PingReason reason = pings[sender_addr];
-    if (P_REPLIED_0 <= reason && reason < P_REPLIED_MAX)
-      pings[sender_addr] = ++reason;
-    pthread_mutex_unlock (&ping_lock);
-    debug ("Received address %8x is not %8x: set to %d recv_count", task->addr, sender_addr, reason - P_REPLIED_0);
-    return -1;
+
+  // Check sequence number of ICMP packet for bounds
+  // If OOB then this packet is invalid / ignored
+  if (!(MIN_SEQ <= seq && seq <= MAX_SEQ)) {
+    debug ("Sequence (%d) is OOB", seq);
+    return -2;
   }
 
-  task->num_recv++;
-  return 0;
+  int has_no_effect;
+  int sender_different = 0;
+
+  if (sender_addr == task->addr) {
+    has_no_effect = (task->reason & SEQ_TO_PINGREASON (seq));
+    // Don't mess with printed stats
+    if (!has_no_effect)
+      task->num_recv++;
+    task->reason |= SEQ_TO_PINGREASON (seq);
+  } else {
+    // Write the sequence number at the sender's address
+    pthread_mutex_lock (&ping_lock);
+    enum PingReason old = pings[sender_addr];
+    // It doesn't make sense if the *expired* task we receive a packet for is not done.
+    ASSERT (old & P_DONE);
+    sender_different = 1;
+    has_no_effect = old & SEQ_TO_PINGREASON (seq);
+    pings[sender_addr] |= SEQ_TO_PINGREASON (seq);
+    pthread_mutex_unlock (&ping_lock);
+  }
+
+  if (has_no_effect)
+    debug ("Received sequence (%d) doesn't change %s.", seq, ip_ntoa (sender_addr));
+  if (sender_different) {
+    char sender_addr_s[32];
+    char *src = ip_ntoa (sender_addr);
+    strncpy (sender_addr_s, src, sizeof (sender_addr_s));
+    debug ("Sender address %s doesn't match task address %s", sender_addr_s, ip_ntoa (task->addr));
+  }
+
+  // If either of these happened, we shouldn't touch the task's list,
+  // since A) if it's a different sender we aren't doing what we think we want,
+  // and B) if it had no effect, then it is a duplicated response and we are treating it like a distinct response.
+  return (sender_different || has_no_effect) ? -2 : 0;
 }
 
 /* Returns 0 if the task became timed out after this call. Returns -1 if the task is unchanged. */
@@ -147,7 +189,7 @@ int
 ping_task_send (struct ping_task *task)
 {
   // Try to send the ping.
-  if (0 > ping_send (task->sock, task->addr, true))
+  if (0 > ping_send (task, true))
     return -1;
   task->num_sent++;
   task->timeout_end = time (NULL) + PING_TIMEOUT;
@@ -187,6 +229,7 @@ void
 ping_task_assign (struct ping_task *task, ipaddr addr)
 {
   task->addr = addr;
+  task->reason = P_UNKNOWN;
   task->num_sent = 0;
   task->num_recv = 0;
 }
@@ -201,9 +244,11 @@ ping_task_done (struct ping_task *task, struct list *free_list)
 
   throughput_tick (task->num_recv);
 
+  task->reason |= P_DONE;
+
   // Write to memory-mapped region
   pthread_mutex_lock (&ping_lock);
-  pings[task->addr] = P_REPLIED_0 + task->num_recv;
+  pings[task->addr] = task->reason;
   pthread_mutex_unlock (&ping_lock);
 
   // Remove task from its list
@@ -215,7 +260,7 @@ ping_task_done (struct ping_task *task, struct list *free_list)
 
 /* Gives a string from an IPv4 address. Cannot be used recursively or ephemerally. Thread-safe. */
 char *
-ip_htos(ipaddr addr)
+ip_ntoa(ipaddr addr)
 {
   struct in_addr in_addr = {
     .s_addr = htonl (addr),
