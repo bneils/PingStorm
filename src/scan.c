@@ -98,7 +98,7 @@ ping_file_open (void)
 void
 cleanup (void)
 {
-  debug ("closing properly...");
+  debug ("Cleaning up resources.");
   msync (pings, IPV4_SIZE, MS_SYNC);
   munmap (pings, IPV4_SIZE);
   close (ping_fd);

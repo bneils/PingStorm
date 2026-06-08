@@ -1,8 +1,12 @@
+#define _GNU_SOURCE
+
+#include <pthread.h>
 #include <semaphore.h>
 #include <sys/mman.h>
 #include <time.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <signal.h>
 
 #include "worker.h"
 #include "list.h"
@@ -38,6 +42,13 @@ const ipaddr special_subnets[17][2] = {
   {0xE9FC0000, 0xFFFFFF00}, // 233.252.0.0/24
   {0xFFFFFFFF, 0xFFFFFFFF}, // 255.255.255.255/32
 };
+
+static void register_handler (void);
+static void sig_handler (int sig);
+static void print_stop_msg (void);
+
+/* set by signal handler; informs workers to stop execution. */
+static volatile sig_atomic_t stop_working;
 
 static struct {
   int sent_count;
@@ -95,6 +106,22 @@ throughput_init (void)
 {
   throughput.current_time = time (NULL);
   pthread_mutex_init (&throughput.lock, NULL);
+}
+
+/* prints the termination message once if a stop request was detected. */
+static void
+print_stop_msg (void)
+{
+  static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+  static int sent_message;
+  if (!stop_working)
+    return;
+  pthread_mutex_lock (&lock);
+  if (!sent_message) {
+    debug ("Received termination signal (%d). Shutting down...", stop_working);
+    sent_message = 1;
+  }
+  pthread_mutex_unlock (&lock);
 }
 
 /* Returns 0 for public addresses, otherwise return the netmask */
@@ -161,6 +188,30 @@ pings_next_unknown (ipaddrl addr, ipaddrl end)
   return addr;
 }
 
+static void
+sig_handler (int sig)
+{
+  // tell all other worker threads to stop
+  stop_working = (sig) ? sig : 1;
+}
+
+static void
+register_handler (void)
+{
+  // Register any signals whose default action is to terminate acc. to signal(7)
+  // Excluding SIGSTOP and SIGKILL
+  const int signals[] = {
+    SIGQUIT, /* like SIGTERM. Ctrl+\ */
+    SIGTSTP, // put into bg. Ctrl+Z
+    SIGINT, // Ctrl+C
+    SIGTERM, // kill
+  };
+  struct sigaction act = { 0 };
+  act.sa_handler = sig_handler;
+  for (size_t i = 0; i < CLEN (signals); ++i)
+    CHECK (0 > sigaction (signals[i], &act, NULL));
+}
+
 /* Create a large number of threads to start working on network requests. */
 void
 start_workers (void)
@@ -177,6 +228,7 @@ start_workers (void)
   sem_init (&sem_worker_inited, 0, 0);
 
   ping_init ();
+  register_handler ();
 
   for (int i = 0; i < NUM_THREADS; ++i) {
     struct worker_args *arg = &w_args[i];
@@ -200,8 +252,19 @@ start_workers (void)
     sem_post (&sem_worker_begin);
 
   // Wait until all threads exit
-  for (int i = 0; i < NUM_THREADS; ++i)
-    pthread_join (tids[i], NULL);
+  struct timespec ts = {
+    .tv_sec = 0,
+    .tv_nsec = (int)1e9 / 2, // .5s
+  };
+  for (int i = 0; i < NUM_THREADS; ++i) {
+    int err;
+    // If the stop message is detected, print it.
+    // This is something the main thread will do as it can execute in short intervals,
+    // with no long blocking operations (such as epoll_wait).
+    while ((err = pthread_timedjoin_np (tids[i], NULL, &ts)))
+      print_stop_msg ();
+  }
+  print_stop_msg ();
 }
 
 void *
@@ -229,8 +292,10 @@ thread_worker (void *args)
 
   char begin_addr_s[32];
   char end_addr_s[32];
-  strncpy (begin_addr_s, ip_ntoa (w->begin), sizeof (begin_addr_s));
-  strncpy (end_addr_s, ip_ntoa (w->end), sizeof (end_addr_s));
+  strncpy (begin_addr_s, ip_ntoa (w->begin), sizeof (begin_addr_s) - 1);
+  strncpy (end_addr_s, ip_ntoa (w->end), sizeof (end_addr_s) - 1);
+  begin_addr_s[sizeof (begin_addr_s) - 1] = '\0';
+  end_addr_s[sizeof (end_addr_s) - 1] = '\0';
 
   // Pick starting point (which might take a while)
   cur = pings_next_unknown (w->begin, w->end);
@@ -254,10 +319,14 @@ thread_worker (void *args)
     list_push_back (&free_list, &tasks[i].elem);
   }
 
-  while (cur <= UINT32_MAX) {
+  int ignore_empty_warning = 1;
+  while (cur <= UINT32_MAX && !stop_working) {
     // Print some debug about the task lists
-    if (list_empty (&timeout_list) && !list_empty (&send_list)) debug ("no tasks in transit (send list not empty)");
-    else if (list_empty (&timeout_list) && list_empty (&send_list)) debug ("no work in queue");
+    if (!ignore_empty_warning) {
+      if (list_empty (&timeout_list) && !list_empty (&send_list)) debug ("Mo tasks in transit (send list not empty)");
+      else if (list_empty (&timeout_list) && list_empty (&send_list)) debug ("No work in queue");
+      ignore_empty_warning = 0;
+    }
 
     // The returned events might be for active or free tasks.
     int num_ready = epoll_wait (epoll_fd, event_queue, MAX_EPOLL_EVENTS, (PING_TIMEOUT + 1) * 1000);
@@ -356,6 +425,7 @@ thread_worker (void *args)
   // Free the opened sockets
   for (size_t i = 0; i < CLEN (tasks); ++i)
     ping_task_destroy (&tasks[i], epoll_fd);
-  debug ("Finished work load");
+  if (!stop_working)
+    debug ("Finished work load");
   return NULL;
 }

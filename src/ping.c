@@ -34,19 +34,17 @@ ping_send (struct ping_task *task, bool wait)
 {
   // Source: https://sturmflut.github.io/linux/ubuntu/2015/01/17/unprivileged-icmp-sockets-on-linux/
   // This helped me with the socket creation, though I've used my own before.
-  struct sockaddr_in sock_addr;
-  struct icmphdr icmp_hdr;
+  struct sockaddr_in sock_addr = { 0 };
+  struct icmphdr icmp_hdr = { 0 };
   char packetdata[sizeof icmp_hdr];
 
   CHECK (task->sock < 0);
 
   // Initialize the destination address
-  memset (&sock_addr, 0, sizeof sock_addr);
   sock_addr.sin_family = AF_INET;
   sock_addr.sin_addr.s_addr = htonl (task->addr);
 
   // Initialize the ICMP header (the rest is filled)
-  memset (&icmp_hdr, 0, sizeof icmp_hdr);
   icmp_hdr.type = ICMP_ECHO;
   ASSERT (MIN_SEQ <= task->num_sent && task->num_sent <= MAX_SEQ);
   icmp_hdr.un.echo.sequence = task->num_sent;
@@ -161,7 +159,8 @@ retry:
   if (sender_different) {
     char sender_addr_s[32];
     char *src = ip_ntoa (sender_addr);
-    strncpy (sender_addr_s, src, sizeof (sender_addr_s));
+    strncpy (sender_addr_s, src, sizeof (sender_addr_s) - 1);
+    sender_addr_s[sizeof (sender_addr_s) - 1] = '\0';
     debug ("Sender address %s doesn't match task address %s", sender_addr_s, ip_ntoa (task->addr));
   }
 
