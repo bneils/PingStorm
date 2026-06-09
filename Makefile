@@ -1,7 +1,7 @@
 NAME=bin/storm
 CC=gcc
 OBJS=$(shell ls src/*.c | sed -e 's/\.c/\.o/' -e 's/src\//bin\//')
-CFLAGS=-Wall -Wextra -Wpedantic -Wno-empty-body -O -DDEBUG
+CFLAGS=-Wall -Wextra -Wpedantic -Wno-empty-body -O -DLOG_LEVEL=LEVEL_TRACE
 
 .PHONY: clean
 

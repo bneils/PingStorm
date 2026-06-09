@@ -14,7 +14,7 @@
  * If the number of done addresses / sec with 1 reply is non-zero, then this means the rate of
  * dropped packets is high.
  */
-#define DATAGRAMS_PER_SEC 1024
+#define DATAGRAMS_PER_SEC 512
 
 // Number of pings to send for each address
 // Keep it no greater than NUM_REPLIES
@@ -32,7 +32,7 @@ ipaddrl skip_special (ipaddrl addr);
 uint8_t *mem_find_not_done(uint8_t *p, uint8_t *end);
 ipaddrl pings_next_unknown (ipaddrl addr, ipaddrl end);
 
-void throughput_tick (int num_recv);
+void throughput_tick (int num_recv, int num_sent, int retried);
 void throughput_init (void);
 
 #endif

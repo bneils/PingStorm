@@ -6,8 +6,8 @@
 #include <errno.h>
 
 #include "ping.h"
-#include "logging.h"
 #include "worker.h"
+#include "macros.h"
 
 // synchronize access to the mapped file
 pthread_mutex_t ping_lock;
@@ -66,7 +66,7 @@ ping_recv (int sock)
   // Check sequence number of ICMP packet for bounds
   // If OOB then this packet is invalid / ignored
   if (!(MIN_SEQ <= seq && seq <= MAX_SEQ)) {
-    debug ("Sequence (%d) is OOB", seq);
+    log (LEVEL_WARN, "Sequence (%d) is OOB", seq);
     return 0;
   }
 

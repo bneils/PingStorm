@@ -9,7 +9,7 @@
 #include <signal.h>
 
 #include "worker.h"
-#include "logging.h"
+#include "macros.h"
 #include "ping.h"
 
 // This resource is increased when the main thread has collected messages
@@ -51,55 +51,48 @@ static volatile sig_atomic_t stop_working;
 
 static struct {
   int sent_count;
+  int retries;
   int done_count;
-  int reply_counts[MAX_REPLIES];
+  int done_reply_counts[MAX_REPLIES];
   time_t current_time;
   pthread_mutex_t lock;
 } throughput;
 
 struct sender_task {
+  int is_some;
   int num_sent;
   ipaddr addr;
   struct timespec time_next;
 };
 
 void
-throughput_tick (int num_recv)
+throughput_tick (int num_recv, int num_sent, int retried)
 {
   ASSERT (0 <= num_recv && num_recv <= MAX_REPLIES);
 
   pthread_mutex_lock (&throughput.lock);
   time_t current_time = time (NULL);
 
-  throughput.sent_count += NUM_SENDS;
-  throughput.reply_counts[num_recv]++;
-  throughput.done_count++;
+  throughput.sent_count += num_sent;
+  if (retried) { throughput.retries++; }
+  else {
+    throughput.done_reply_counts[num_recv]++;
+    throughput.done_count++;
+  }
 
   if (current_time - throughput.current_time >= DEBUG_STATS_SECS) {
-    int duration = (int)(current_time - throughput.current_time);
-    // Format the debug string
-    char dst[256];
-    int dst_size = sizeof (dst);
-    int num_written;
-    int pos = 0;
-    memset (dst, 0, dst_size);
-    for (int i = 0; i <= NUM_SENDS; ++i) {
-      num_written = snprintf (&dst[pos], dst_size, "%.1f/sec (%d replies), ",
-        (float)throughput.reply_counts[i] / duration, i);
-      ASSERT (num_written >= 0);
-      dst_size -= num_written;
-      pos += num_written;
-      ASSERT (dst_size >= 0);
-    }
-    // Add number of sends & finished
-    CHECK (0 > snprintf (&dst[pos], dst_size, "sent %.1f/sec, done %.1f/sec",
-      (float)throughput.sent_count / duration, (float)throughput.done_count / duration));
+    float duration = (float)(current_time - throughput.current_time);
 
-    // Output it to terminal
-    debugstr (dst);
+    // finished N/sec (N/sec (0 replies), N/sec (NUM_SEND replies)), retried N/sec
 
-    memset (throughput.reply_counts, 0, sizeof (throughput.reply_counts));
+    log (LEVEL_INFO, "finished %.1f (%.1f/sec (0) & %.1f/sec (%d)), retried %.1f/sec, total sent %.1f/sec",
+      throughput.done_count / duration, throughput.done_reply_counts[0] / duration,
+      throughput.done_reply_counts[NUM_SENDS] / duration, NUM_SENDS, throughput.retries / duration,
+      throughput.sent_count / duration);
+
+    memset (throughput.done_reply_counts, 0, sizeof (throughput.done_reply_counts));
     throughput.current_time = current_time;
+    throughput.retries = 0;
     throughput.sent_count = 0;
     throughput.done_count = 0;
   }
@@ -123,7 +116,7 @@ print_stop_msg (void)
     return;
   pthread_mutex_lock (&lock);
   if (!sent_message) {
-    debug ("Received termination signal (%d). Shutting down...", stop_working);
+    log (LEVEL_INFO, "Received termination signal (%d). Shutting down...", stop_working);
     sent_message = 1;
   }
   pthread_mutex_unlock (&lock);
@@ -239,7 +232,7 @@ start_sender (void *ptr)
 
   current = pings_next_unknown (0, UINT32_MAX);
   if (current > UINT32_MAX) {
-    debug ("Nothing to send");
+    log (LEVEL_INFO, "Nothing to send");
     sem_post (&sem_worker_inited);
     return NULL;
   }
@@ -247,63 +240,68 @@ start_sender (void *ptr)
   sem_post (&sem_worker_inited);
   sem_wait (&sem_worker_begin);
 
-  debug ("Send thread started at %s", ip_ntoa (current));
+  log (LEVEL_INFO, "Send thread started at %s", ip_ntoa (current));
 
-  int open_tasks = CLEN (tasks);
   for (;;) {
+    int progress = 0;
     for (size_t i = 0; i < CLEN (tasks); ++i) {
       struct sender_task *t = &tasks[i];
 
       if (stop_working)
         return NULL;
 
-      // This task was given a time it could until finishing
-      if (t->num_sent > 0)
+      if (t->is_some) {
+        // This task was given a time it could until finishing
         sleep_until (&t->time_next);
 
-      // Task has no more sends, we mark it as "done"
-      if (t->num_sent == NUM_SENDS) {
-        int num_replies;
-        pthread_mutex_lock (&ping_lock);
-        num_replies = count_replies (pings[t->addr]);
-        // Depending on number of replies, we can choose to invalidate this result and instead retry.
-        if (num_replies > 1) {
+        // Task has no more sends, we mark it as "done"
+        if (t->num_sent == NUM_SENDS) {
+          pthread_mutex_lock (&ping_lock);
           pings[t->addr] |= P_DONE;
-          open_tasks++;
-        } else {
-          pings[t->addr] = 0;
-        }
-        pthread_mutex_unlock (&ping_lock);
+          int num_replies = count_replies (pings[t->addr]);
+          if (num_replies > 0) {
+            log (LEVEL_TRACE, "%s (%d)", ip_ntoa (t->addr), num_replies);
+          }
+          pthread_mutex_unlock (&ping_lock);
 
-        if (num_replies > 1)
-          throughput_tick (num_replies);
-        t->num_sent = 0;
+          // Depending on number of replies, we can choose to invalidate this result and instead retry.
+          if (num_replies == 1 && 1 < NUM_SENDS)
+            current = t->addr; // Retry the task
+
+          throughput_tick (num_replies, NUM_SENDS, (current == t->addr));
+          t->is_some = 0;
+        }
       }
 
-      // num_sent indicates the task is free, we assign to it if we're not done
-      if (open_tasks > 0) {
-        ASSERT (t->num_sent == 0);
-        if (current > UINT32_MAX)
-          continue;
-        open_tasks--;
+      // Create a new task if this object is empty
+      // Initialize this for the new address
+      if (!t->is_some && current <= UINT32_MAX) {
         t->addr = current;
+        t->is_some = 1;
+        t->num_sent = 0;
         pthread_mutex_lock (&ping_lock);
         pings[t->addr] = 0;
         pthread_mutex_unlock (&ping_lock);
         current = pings_next_unknown(current + 1, UINT32_MAX);
       }
 
+      // Do not proceed if this task is empty
+      if (!t->is_some)
+        continue;
+
       // Send the ping and reset the cooldown
       int seq = t->num_sent;
       while (0 > ping_send (sock, t->addr, seq)) {
         // Not much we can do if this fails besides just wait and retry
-        PERROR ("ping_send");
+        log_source (LEVEL_ERROR, "ping_send");
         sleep (5);
       }
 
+      // Set cooldown and num sent for future task completion
       clock_gettime (CLOCK_MONOTONIC_RAW, &t->time_next);
       t->time_next.tv_sec += PING_TIMEOUT;
       t->num_sent++;
+      progress = 1;
 
       // Wait to match DATAGRAMS_PER_SEC.
       struct timespec ts = { 0 };
@@ -312,10 +310,11 @@ start_sender (void *ptr)
         ;
     }
 
-    // Terminal condition
-    if (current > UINT32_MAX && open_tasks == CLEN (tasks))
+    // Terminal condition (!progress means no pings were sent)
+    if (current > UINT32_MAX && !progress)
       break;
   }
+  log (LEVEL_INFO, "Send thread exiting...");
 
   return NULL;
 }
@@ -329,7 +328,7 @@ start_receiver (void *ptr)
   sem_post (&sem_worker_inited);
   sem_wait (&sem_worker_begin);
 
-  debug ("Receive thread started");
+  log (LEVEL_INFO, "Receive thread started");
 
   while (!stop_working)
     ping_recv (sock);

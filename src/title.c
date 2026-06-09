@@ -5,7 +5,7 @@
 #include <time.h>
 
 #include "title.h"
-#include "logging.h"
+#include "macros.h"
 
 static size_t str_max_line_len (const char *s);
 

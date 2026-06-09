@@ -1,33 +1,40 @@
-#ifndef DEBUG_H
-#define DEBUG_H
+#ifndef LOGGING_H
 
 #include <stdio.h>
-#include <pthread.h>
-#include <string.h>
-#include <stdlib.h>
 #include <errno.h>
+#include <string.h>
 
-#if DEBUG
-#define debug(fmt, ...) printf ("(tid %lu) " fmt "\n", pthread_self () __VA_OPT__(,) __VA_ARGS__)
-#define debugstr(buf) printf ("(tid %lu) %s\n", pthread_self (), buf)
-#else
-#define debug(fmt, ...)
-#define debugstr(buf)
+// Reference https://en.wikipedia.org/wiki/Log4j#Log4j_log_levels
+
+enum LogLevel {
+  LEVEL_TRACE,
+  LEVEL_DEBUG,
+  LEVEL_INFO,
+  LEVEL_WARN,
+  LEVEL_ERROR,
+  LEVEL_FATAL,
+  LEVEL_OFF
+};
+
+#ifndef LOG_LEVEL
+#define LOG_LEVEL LEVEL_INFO
 #endif
 
-#define WARN(expr) if (expr) PERROR ("WARN(" #expr ")");
-#define ASSERT(expr) if (!(expr)) PANIC ("ASSERT(" #expr ")")
-#define CHECK(expr) if (expr) PANIC ("CHECK(" #expr ")")
-#define PANIC(msg) { \
-  PERROR (msg); \
-  exit (EXIT_FAILURE); \
-}
+extern const char *log_level_strs[];
 
-#define PERROR(msg) \
-  fprintf (stderr, "(tid %lu) %s:%d %s: %s (%d)\n", \
-    pthread_self (), __FILE__, __LINE__, (msg), \
-    (errno) ? strerror (errno) : "panic", errno)
+// Emit expression only if dereferenced pointer is non-zero
+#define EMIT_IF_LOGLEVEL(level, rettype, expr) if ((level) >= LOG_LEVEL) expr; else /* ; */
 
-#define CLEN(arr) (sizeof (arr) / sizeof (*arr))
+#define LOG_FD(level) \
+  ((level >= LEVEL_WARN) ? stderr : stdout)
+
+#define log(level, fmt, ...) \
+  EMIT_IF_LOGLEVEL (level, int, fprintf (LOG_FD (level), "%s " fmt "\n", log_level_strs[level] __VA_OPT__(,) __VA_ARGS__))
+#define log_tid(level, fmt, ...) \
+  EMIT_IF_LOGLEVEL (level, int, fprintf (LOG_FD (level), "%s (tid %lu) " fmt "\n", log_level_strs[level], pthread_self () __VA_OPT__(,) __VA_ARGS__))
+#define log_buf(level, fmtbuf, ...) \
+  EMIT_IF_LOGLEVEL (level, int, fprintf (LOG_FD (level), fmtbuf, log_level_strs[level] __VA_OPT__(,) __VA_ARGS__))
+#define log_source(level, msg) \
+  log (level, "%s:%d %s: %s (%d)", __FILE__, __LINE__, (msg), (errno) ? strerror (errno) : "panic", errno)
 
 #endif
