@@ -2,6 +2,8 @@
 This program gathers IPv4 ICMP echo response data that may be used to create a heatmap of the global IPv4 address space.
 Such an image would contain $2^{32}$ or 4.2 billion pixels.
 
+![Command-line interface](example.png "Command-line interface")
+
 ## Limitations
 Firstly, it is very important to recognize that ICMP is a connection-less datagram protocol which doesn't have the
 guarantees that connection-oriented protocols have. There is no delivery guarantee and importantly no congestion control

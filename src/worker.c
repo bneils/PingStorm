@@ -228,7 +228,7 @@ sleep_until (struct timespec *t)
 void *
 start_sender (void *ptr)
 {
-  struct sender_task tasks[DATAGRAMS_PER_SEC * PING_TIMEOUT * 2];
+  struct sender_task tasks[DATAGRAMS_PER_SEC * (PING_TIMEOUT + 1)];
   ipaddrl current;
   ipaddr end;
   int sock;
