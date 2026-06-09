@@ -25,7 +25,7 @@
 
 extern const ipaddr special_subnets[17][2];
 
-void start_workers (void);
+void start_workers (ipaddr start, ipaddr end);
 
 ipaddr is_special (ipaddr addr);
 ipaddrl skip_special (ipaddrl addr);

@@ -64,6 +64,12 @@ struct sender_task {
   struct timespec time_next;
 };
 
+struct sender_args {
+  int sock;
+  ipaddr start;
+  ipaddr end;
+};
+
 void
 throughput_tick (int num_recv, int num_sent, ipaddr addr_done)
 {
@@ -224,14 +230,18 @@ start_sender (void *ptr)
 {
   struct sender_task tasks[DATAGRAMS_PER_SEC * PING_TIMEOUT * 2];
   ipaddrl current;
+  ipaddr end;
   int sock;
 
   memset (tasks, 0, sizeof tasks);
-  sock = *(int *)ptr;
+  struct sender_args *args = ptr;
+  sock = args->sock;
+  end = args->end;
 
-  current = pings_next_unknown (0, UINT32_MAX);
-  if (current > UINT32_MAX) {
-    log (LEVEL_INFO, "Nothing to send");
+  current = pings_next_unknown (args->start, end);
+  if (current > end) {
+    log (LEVEL_WARN, "Sender has nothing to send. Exiting...");
+    stop_working = 1;
     sem_post (&sem_worker_inited);
     return NULL;
   }
@@ -269,14 +279,14 @@ start_sender (void *ptr)
 
       // Create a new task if this object is empty
       // Initialize this for the new address
-      if (!t->is_some && current <= UINT32_MAX) {
+      if (!t->is_some && current <= end) {
         t->addr = current;
         t->is_some = 1;
         t->num_sent = 0;
         pthread_mutex_lock (&ping_lock);
         pings[t->addr] = 0;
         pthread_mutex_unlock (&ping_lock);
-        current = pings_next_unknown(current + 1, UINT32_MAX);
+        current = pings_next_unknown(current + 1, end);
       }
 
       // Do not proceed if this task is empty
@@ -305,7 +315,7 @@ start_sender (void *ptr)
     }
 
     // Terminal condition (!progress means no pings were sent)
-    if (current > UINT32_MAX && !progress)
+    if (current > end && !progress)
       break;
   }
   log (LEVEL_INFO, "Send thread exiting...");
@@ -336,7 +346,7 @@ start_receiver (void *ptr)
 
 /* Create a large number of threads to start working on network requests. */
 void
-start_workers (void)
+start_workers (ipaddr start, ipaddr end)
 {
   pthread_t tids[2];
   int sock;
@@ -357,7 +367,14 @@ start_workers (void)
   pthread_create (&tids[0], NULL, start_receiver, &sock);
   sem_wait (&sem_worker_inited);
   sem_post (&sem_worker_begin);
-  pthread_create (&tids[1], NULL, start_sender, &sock);
+
+  // Provide sender with arguments
+  struct sender_args args = {
+    .sock = sock,
+    .start = start,
+    .end = end,
+  };
+  pthread_create (&tids[1], NULL, start_sender, &args);
   sem_wait (&sem_worker_inited);
   sem_post (&sem_worker_begin);
 
