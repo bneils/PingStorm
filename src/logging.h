@@ -23,7 +23,7 @@ enum LogLevel {
 extern const char *log_level_strs[];
 
 // Emit expression only if dereferenced pointer is non-zero
-#define EMIT_IF_LOGLEVEL(level, rettype, expr) if ((level) >= LOG_LEVEL) expr; else /* ; */
+#define EMIT_IF_LOGLEVEL(level, rettype, expr) (void)(((level) >= LOG_LEVEL) ? expr : 0)
 
 #define LOG_FD(level) \
   ((level >= LEVEL_WARN) ? stderr : stdout)

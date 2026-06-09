@@ -70,6 +70,8 @@ ping_recv (int sock)
     return 0;
   }
 
+  log (LEVEL_TRACE, "%s (seq=%d)", ip_ntoa (sender_addr), seq);
+
   // Write the sequence number at the sender's address
   pthread_mutex_lock (&ping_lock);
   pings[sender_addr] |= SEQ_TO_BIT (seq);

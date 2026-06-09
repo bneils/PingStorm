@@ -51,7 +51,6 @@ static volatile sig_atomic_t stop_working;
 
 static struct {
   int sent_count;
-  int retries;
   int done_count;
   int done_reply_counts[MAX_REPLIES];
   time_t current_time;
@@ -66,7 +65,7 @@ struct sender_task {
 };
 
 void
-throughput_tick (int num_recv, int num_sent, int retried)
+throughput_tick (int num_recv, int num_sent, ipaddr addr_done)
 {
   ASSERT (0 <= num_recv && num_recv <= MAX_REPLIES);
 
@@ -74,25 +73,25 @@ throughput_tick (int num_recv, int num_sent, int retried)
   time_t current_time = time (NULL);
 
   throughput.sent_count += num_sent;
-  if (retried) { throughput.retries++; }
-  else {
-    throughput.done_reply_counts[num_recv]++;
-    throughput.done_count++;
-  }
+  throughput.done_reply_counts[num_recv]++;
+  throughput.done_count++;
 
   if (current_time - throughput.current_time >= DEBUG_STATS_SECS) {
     float duration = (float)(current_time - throughput.current_time);
 
-    // finished N/sec (N/sec (0 replies), N/sec (NUM_SEND replies)), retried N/sec
-
-    log (LEVEL_INFO, "finished %.1f (%.1f/sec (0) & %.1f/sec (%d)), retried %.1f/sec, total sent %.1f/sec",
-      throughput.done_count / duration, throughput.done_reply_counts[0] / duration,
-      throughput.done_reply_counts[NUM_SENDS] / duration, NUM_SENDS, throughput.retries / duration,
-      throughput.sent_count / duration);
+    log (LEVEL_INFO,
+      "Finished %.1f (%.1f/sec (0), %.1f/sec (1), %.1f/sec (2), %.1f/sec (3)). Total sent %.1f/sec. %s",
+      throughput.done_count / duration,
+      throughput.done_reply_counts[0] / duration,
+      throughput.done_reply_counts[1] / duration,
+      throughput.done_reply_counts[2] / duration,
+      throughput.done_reply_counts[3] / duration,
+      throughput.sent_count / duration,
+      ip_ntoa (addr_done)
+    );
 
     memset (throughput.done_reply_counts, 0, sizeof (throughput.done_reply_counts));
     throughput.current_time = current_time;
-    throughput.retries = 0;
     throughput.sent_count = 0;
     throughput.done_count = 0;
   }
@@ -243,12 +242,15 @@ start_sender (void *ptr)
   log (LEVEL_INFO, "Send thread started at %s", ip_ntoa (current));
 
   for (;;) {
+    if (stop_working)
+      break;
     int progress = 0;
     for (size_t i = 0; i < CLEN (tasks); ++i) {
       struct sender_task *t = &tasks[i];
 
+      // Calling break in here will quickly exit outer loop
       if (stop_working)
-        return NULL;
+        break;
 
       if (t->is_some) {
         // This task was given a time it could until finishing
@@ -259,16 +261,8 @@ start_sender (void *ptr)
           pthread_mutex_lock (&ping_lock);
           pings[t->addr] |= P_DONE;
           int num_replies = count_replies (pings[t->addr]);
-          if (num_replies > 0) {
-            log (LEVEL_TRACE, "%s (%d)", ip_ntoa (t->addr), num_replies);
-          }
           pthread_mutex_unlock (&ping_lock);
-
-          // Depending on number of replies, we can choose to invalidate this result and instead retry.
-          if (num_replies == 1 && 1 < NUM_SENDS)
-            current = t->addr; // Retry the task
-
-          throughput_tick (num_replies, NUM_SENDS, (current == t->addr));
+          throughput_tick (num_replies, NUM_SENDS, t->addr);
           t->is_some = 0;
         }
       }
@@ -305,7 +299,7 @@ start_sender (void *ptr)
 
       // Wait to match DATAGRAMS_PER_SEC.
       struct timespec ts = { 0 };
-      ts.tv_nsec = 1e9 / DATAGRAMS_PER_SEC;
+      ts.tv_nsec = (int)1e9 / DATAGRAMS_PER_SEC;
       while (0 > nanosleep (&ts, &ts))
         ;
     }
@@ -315,6 +309,7 @@ start_sender (void *ptr)
       break;
   }
   log (LEVEL_INFO, "Send thread exiting...");
+  stop_working = 1;
 
   return NULL;
 }
@@ -331,7 +326,11 @@ start_receiver (void *ptr)
   log (LEVEL_INFO, "Receive thread started");
 
   while (!stop_working)
-    ping_recv (sock);
+    if (0 > ping_recv (sock)) {
+      log (LEVEL_TRACE, "ping_recv: timeout");
+    }
+
+  log (LEVEL_INFO, "Receive thread exiting...");
   return NULL;
 }
 

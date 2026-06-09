@@ -85,7 +85,7 @@ main (void)
   if (0 > get_titlecard(&title, &attr))
     log_source (LEVEL_ERROR, "get_titlecard");
   else
-    printf ("%s\n%s\n\n%s\n\n", title, attr, TITLE_WEBSITE_ATTRIBUTION);
+    printf ("%s\nPing Storm by Ben Neilsen\n\n%s\n%s\n\n", title, attr, TITLE_WEBSITE_ATTRIBUTION);
   ping_file_open ();
   start_workers ();
   cleanup ();
