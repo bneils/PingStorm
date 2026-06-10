@@ -45,7 +45,6 @@ const ipaddr special_subnets[17][2] = {
 static void register_handler (void);
 static void sig_handler (int sig);
 static void print_stop_msg (void);
-static void sleep_until (struct timespec *t);
 
 /* set by signal handler; informs workers to stop execution. */
 static volatile sig_atomic_t stop_working;
@@ -71,7 +70,7 @@ struct sender_args {
 };
 
 void
-throughput_tick (int num_recv, int num_sent, ipaddr addr_done)
+throughput_tick (int num_recv, int num_sent, ipaddr addr_done, struct config *cnf)
 {
   ASSERT (0 <= num_recv && num_recv <= MAX_REPLIES);
 
@@ -82,7 +81,7 @@ throughput_tick (int num_recv, int num_sent, ipaddr addr_done)
   throughput.done_reply_counts[num_recv]++;
   throughput.done_count++;
 
-  if (current_time - throughput.current_time >= DEBUG_STATS_SECS) {
+  if (current_time - throughput.current_time >= cnf->sends_per_addr * PING_TIMEOUT) {
     float duration = (float)(current_time - throughput.current_time);
 
     wlog (LEVEL_INFO,
@@ -202,29 +201,6 @@ register_handler (void)
     CHECK (0 > sigaction (signals[i], &act, NULL));
 }
 
-static void
-sleep_until (struct timespec *t)
-{
-  struct timespec now;
-  clock_gettime (CLOCK_MONOTONIC_RAW, &now);
-  // Calculate difference between now and wakeup time
-  struct timespec diff = {
-    .tv_sec = t->tv_sec - now.tv_sec,
-    .tv_nsec = t->tv_nsec - now.tv_nsec,
-  };
-  if (diff.tv_nsec < 0) {
-    diff.tv_sec--;
-    diff.tv_nsec += (long)1e9;
-  }
-
-  if (diff.tv_sec < 0)
-    return;
-
-  // Sleep for at least that amount of time
-  while (0 > nanosleep (&diff, &diff))
-    ;
-}
-
 void *
 start_sender (void *ptr)
 {
@@ -237,7 +213,10 @@ start_sender (void *ptr)
   int sock;
 
   cnf = args->conf;
-  len = cnf->datagrams_per_sec * (PING_TIMEOUT + 1);
+
+  // We are consuming `datagrams_per_sec` in the circular array.
+  // The time between subsequent accesses to the same cell is (len / datagrams_per_sec) => PING_TIMEOUT.
+  len = cnf->datagrams_per_sec * PING_TIMEOUT;
   tasks = calloc (len, sizeof (struct sender_task));
   sock = args->sock;
   end = cnf->end;
@@ -255,6 +234,12 @@ start_sender (void *ptr)
 
   wlog (LEVEL_INFO, "Send thread started at %s", ip_ntoa (current));
 
+  // Specifies that our sleeps should be in 50ms intervals.
+  // Selecting a higher intervals means sleeping less often.
+  const int sleep_interval = 50;
+  size_t sleep_quotient = sleep_interval * cnf->datagrams_per_sec / 1000;
+  ASSERT (sleep_quotient < len);
+
   for (;;) {
     if (stop_working)
       break;
@@ -267,16 +252,13 @@ start_sender (void *ptr)
         break;
 
       if (t->is_some) {
-        // This task was given a time it could until finishing
-        sleep_until (&t->time_next);
-
         // Task has no more sends, we mark it as "done"
         if (t->num_sent == cnf->sends_per_addr) {
           pthread_mutex_lock (&ping_lock);
           pings[t->addr] |= P_DONE;
           int num_replies = count_replies (pings[t->addr], cnf->sends_per_addr);
           pthread_mutex_unlock (&ping_lock);
-          throughput_tick (num_replies, cnf->sends_per_addr, t->addr);
+          throughput_tick (num_replies, cnf->sends_per_addr, t->addr, cnf);
           t->is_some = 0;
         }
       }
@@ -312,9 +294,12 @@ start_sender (void *ptr)
       t->num_sent++;
       progress = 1;
 
+      if (i % sleep_quotient != 0)
+        continue;
+
       // Wait to match DATAGRAMS_PER_SEC.
       struct timespec ts = { 0 };
-      ts.tv_nsec = (int)1e9 / cnf->datagrams_per_sec;
+      ts.tv_nsec = sleep_interval * (int)1e6;
       while (0 > nanosleep (&ts, &ts))
         ;
     }
@@ -324,6 +309,7 @@ start_sender (void *ptr)
       break;
   }
   wlog (LEVEL_INFO, "Send thread exiting...");
+  free (tasks);
   stop_working = 1;
 
   return NULL;
@@ -344,6 +330,11 @@ start_receiver (void *ptr)
     if (0 > ping_recv (sock)) {
       wlog (LEVEL_TRACE, "ping_recv: timeout");
     }
+
+  wlog (LEVEL_INFO, "Receive thread waiting for strays.");
+  // Catch any strays
+  while (0 > ping_recv (sock))
+    ;
 
   wlog (LEVEL_INFO, "Receive thread exiting...");
   return NULL;

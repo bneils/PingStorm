@@ -21,9 +21,6 @@
 // Keep it no greater than NUM_REPLIES
 #define DEFAULT_NUM_SENDS 3
 
-// Amount of time to wait in-between printing stats
-#define DEBUG_STATS_SECS (DEFAULT_NUM_SENDS * PING_TIMEOUT)
-
 extern const ipaddr special_subnets[17][2];
 
 void start_workers (struct config *conf);
@@ -33,7 +30,7 @@ ipaddrl skip_special (ipaddrl addr);
 uint8_t *mem_find_not_done(uint8_t *p, uint8_t *end);
 ipaddrl pings_next_unknown (ipaddrl addr, ipaddrl end);
 
-void throughput_tick (int num_recv, int num_sent, ipaddr addr_done);
+void throughput_tick (int num_recv, int num_sent, ipaddr addr_done, struct config *cnf);
 void throughput_init (void);
 
 #endif

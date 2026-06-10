@@ -6,7 +6,10 @@
 #include <pthread.h>
 
 #define PING_FILENAME "ping.dat"
-#define PING_TIMEOUT 5
+
+// There is no reason to set PING_TIMEOUT low.
+// Increasing it will only increase memory usage slightly. (500K -> 1000K)
+#define PING_TIMEOUT 10
 
 #define MIN_U8_SHIFT 2
 #define MAX_U8_SHIFT 7
