@@ -1,6 +1,7 @@
 #include "logging.h"
 #include <stdarg.h>
 #include <malloc.h>
+#include <time.h>
 
 FILE *log_file;
 int log_file_level = LEVEL_OFF;
@@ -26,9 +27,9 @@ const char *log_level_strs[] = {
   ""      // off
 };
 
-/* print to files f1 and f2, skipping either if NULL is given, then flushing both */
+/* print to console and log, skipping either if NULL is given, then flushing both. Includes date/time in log. */
 void
-ffprintf (FILE *f1, FILE *f2, char *fmt, ...)
+ffprintf (FILE *console, FILE *log_file, char *fmt, ...)
 {
   // https://stackoverflow.com/questions/2288680/reuse-of-va-list
   // ^ very deadly bug :(
@@ -38,13 +39,20 @@ ffprintf (FILE *f1, FILE *f2, char *fmt, ...)
   va_start (args, fmt);
   va_copy (dup_args, args);
 
-  if (f1) {
-    vfprintf(f1, fmt, args);
-    fflush (f1);
+  if (console) {
+    vfprintf (console, fmt, args);
+    fflush (console);
   }
-  if (f2) {
-    vfprintf(f2, fmt, dup_args);
-    fflush (f2);
+  if (log_file) {
+    // https://stackoverflow.com/questions/10917491/building-a-date-string-in-c
+    char datestr[100];
+    time_t now = time (NULL);
+    struct tm *t = localtime (&now);
+    strftime (datestr, sizeof (datestr) - 1, "%Y-%m-%d %H:%M", t);
+    fprintf (log_file, "%s ", datestr);
+
+    vfprintf (log_file, fmt, dup_args);
+    fflush (log_file);
   }
 
   // cleanup
