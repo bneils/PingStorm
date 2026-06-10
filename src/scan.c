@@ -50,7 +50,7 @@ ping_file_open (void)
 
   if (init_file) {
     // Fill the private memory regions
-    log (LEVEL_INFO, "Filling reserved regions in ping file");
+    wlog (LEVEL_INFO, "Filling reserved regions in ping file");
 
     // Fill the region with P_PRIVATE.
     for (uint32_t i = 0; i < CLEN (special_subnets); ++i) {
@@ -64,7 +64,7 @@ ping_file_open (void)
   }
   #ifdef CHECK_RESERVED
   // Verify regions are OK
-  log (LEVEL_INFO, "Validating reserved regions thoroughly");
+  wlog (LEVEL_INFO, "Validating reserved regions thoroughly");
   for (uint64_t a = 0; a <= UINT32_MAX; ++a) {
     bool actual = (P_PRIVATE & pings[a]) != 0;
     bool expected = is_special (a) != 0;
@@ -77,7 +77,7 @@ ping_file_open (void)
 static void
 cleanup (void)
 {
-  log (LEVEL_INFO, "Cleaning up resources.");
+  wlog (LEVEL_INFO, "Cleaning up resources.");
   msync (pings, IPV4_SIZE, MS_SYNC);
   munmap (pings, IPV4_SIZE);
   close (ping_fd);

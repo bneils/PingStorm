@@ -16,7 +16,7 @@ config_parse_line_opt (const char *line, size_t len, size_t *left_len, size_t *r
   // [a-zA-Z_]+\s*=\s*[a-zA-Z_0-9]+
 
   if (!isalpha (line[0]) && line[0] != '_') {
-    log (LEVEL_FATAL, "config_parse_opt: '%s': lvalue must start with an alphabetical", line);
+    wlog (LEVEL_FATAL, "config_parse_opt: '%s': lvalue must start with an alphabetical", line);
     exit (EXIT_FAILURE);
   }
 
@@ -33,13 +33,13 @@ config_parse_line_opt (const char *line, size_t len, size_t *left_len, size_t *r
   *left_len = non_alpha;
 
   if (!equal_sign) {
-    log (LEVEL_FATAL, "config_parse_opt: '%s' has no '='", line);
+    wlog (LEVEL_FATAL, "config_parse_opt: '%s' has no '='", line);
     exit (EXIT_FAILURE);
   }
 
   for (size_t i = non_alpha; i < equal_sign; ++i)
     if (!isspace (line[i])) {
-      log (LEVEL_FATAL, "config_parse_opt: '%s': lvalue contains '%c'", line, line[i]);
+      wlog (LEVEL_FATAL, "config_parse_opt: '%s': lvalue contains '%c'", line, line[i]);
       exit (EXIT_FAILURE);
     }
 
@@ -50,12 +50,12 @@ config_parse_line_opt (const char *line, size_t len, size_t *left_len, size_t *r
       *right = i + 1;
       break;
     } else if (!isspace (line[i])) {
-      log (LEVEL_FATAL, "config_parse_opt: '%s': preceding rvalue is '%c'", line, line[i]);
+      wlog (LEVEL_FATAL, "config_parse_opt: '%s': preceding rvalue is '%c'", line, line[i]);
       exit (EXIT_FAILURE);
     }
 
   if (!*right) {
-    log (LEVEL_FATAL, "config_parse_opt: '%s': rvalue not found", line);
+    wlog (LEVEL_FATAL, "config_parse_opt: '%s': rvalue not found", line);
     exit (EXIT_FAILURE);
   }
 
@@ -66,7 +66,7 @@ config_parse_line_opt (const char *line, size_t len, size_t *left_len, size_t *r
       break;
     }
   if (!end_right) {
-    log (LEVEL_FATAL, "config_parse_opt: '%s': rvalue no matching `'`", line);
+    wlog (LEVEL_FATAL, "config_parse_opt: '%s': rvalue no matching `'`", line);
     exit (EXIT_FAILURE);
   }
   *right_len = end_right - *right;
@@ -137,7 +137,7 @@ config_load (char *config_path, struct config *conf)
 
   // open config file
   if (!(fptr = fopen (config_path, "r"))) {
-    log (LEVEL_WARN, "couldn't open '%s' (using defaults): %s", config_path, strerror (errno));
+    wlog (LEVEL_WARN, "couldn't open '%s' (using defaults): %s", config_path, strerror (errno));
     return;
   }
 
@@ -194,11 +194,11 @@ config_load (char *config_path, struct config *conf)
     }
 
     else {
-      log (LEVEL_FATAL, "'%s' not an option", leftopt);
+      wlog (LEVEL_FATAL, "'%s' not an option", leftopt);
       exit (EXIT_FAILURE);
     }
 
-    log (LEVEL_INFO, "(config) %s = %s", leftopt, rightopt);
+    wlog (LEVEL_INFO, "(config) %s = %s", leftopt, rightopt);
 
     // this was malloc'd
     free (leftopt);

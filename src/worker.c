@@ -85,7 +85,7 @@ throughput_tick (int num_recv, int num_sent, ipaddr addr_done)
   if (current_time - throughput.current_time >= DEBUG_STATS_SECS) {
     float duration = (float)(current_time - throughput.current_time);
 
-    log (LEVEL_INFO,
+    wlog (LEVEL_INFO,
       "Finished %.1f (%.1f/sec (0), %.1f/sec (1), %.1f/sec (2), %.1f/sec (3)). Total sent %.1f/sec. %s",
       throughput.done_count / duration,
       throughput.done_reply_counts[0] / duration,
@@ -121,7 +121,7 @@ print_stop_msg (void)
     return;
   pthread_mutex_lock (&lock);
   if (!sent_message) {
-    log (LEVEL_INFO, "Received termination signal (%d). Shutting down...", stop_working);
+    wlog (LEVEL_INFO, "Received termination signal (%d). Shutting down...", stop_working);
     sent_message = 1;
   }
   pthread_mutex_unlock (&lock);
@@ -244,7 +244,7 @@ start_sender (void *ptr)
 
   current = pings_next_unknown (cnf->begin, end);
   if (current > end) {
-    log (LEVEL_WARN, "Sender has nothing to send. Exiting...");
+    wlog (LEVEL_WARN, "Sender has nothing to send. Exiting...");
     stop_working = 1;
     sem_post (&sem_worker_inited);
     return NULL;
@@ -253,7 +253,7 @@ start_sender (void *ptr)
   sem_post (&sem_worker_inited);
   sem_wait (&sem_worker_begin);
 
-  log (LEVEL_INFO, "Send thread started at %s", ip_ntoa (current));
+  wlog (LEVEL_INFO, "Send thread started at %s", ip_ntoa (current));
 
   for (;;) {
     if (stop_working)
@@ -323,7 +323,7 @@ start_sender (void *ptr)
     if (current > end && !progress)
       break;
   }
-  log (LEVEL_INFO, "Send thread exiting...");
+  wlog (LEVEL_INFO, "Send thread exiting...");
   stop_working = 1;
 
   return NULL;
@@ -338,14 +338,14 @@ start_receiver (void *ptr)
   sem_post (&sem_worker_inited);
   sem_wait (&sem_worker_begin);
 
-  log (LEVEL_INFO, "Receive thread started");
+  wlog (LEVEL_INFO, "Receive thread started");
 
   while (!stop_working)
     if (0 > ping_recv (sock)) {
-      log (LEVEL_TRACE, "ping_recv: timeout");
+      wlog (LEVEL_TRACE, "ping_recv: timeout");
     }
 
-  log (LEVEL_INFO, "Receive thread exiting...");
+  wlog (LEVEL_INFO, "Receive thread exiting...");
   return NULL;
 }
 

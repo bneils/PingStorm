@@ -65,11 +65,11 @@ ping_recv (int sock)
   // Check sequence number of ICMP packet for bounds
   // If OOB then this packet is invalid / ignored
   if (!(MIN_SEQ <= seq && seq <= MAX_SEQ)) {
-    log (LEVEL_WARN, "Sequence (%d) is OOB", seq);
+    wlog (LEVEL_WARN, "Sequence (%d) is OOB", seq);
     return 0;
   }
 
-  log (LEVEL_TRACE, "%s (seq=%d)", ip_ntoa (sender_addr), seq);
+  wlog (LEVEL_TRACE, "%s (seq=%d)", ip_ntoa (sender_addr), seq);
 
   // Write the sequence number at the sender's address
   pthread_mutex_lock (&ping_lock);
