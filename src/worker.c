@@ -11,6 +11,7 @@
 #include "worker.h"
 #include "macros.h"
 #include "ping.h"
+#include "config.h"
 
 // This resource is increased when the main thread has collected messages
 // from all threads that they are initialized.
@@ -66,8 +67,7 @@ struct sender_task {
 
 struct sender_args {
   int sock;
-  ipaddr start;
-  ipaddr end;
+  struct config *conf;
 };
 
 void
@@ -228,17 +228,21 @@ sleep_until (struct timespec *t)
 void *
 start_sender (void *ptr)
 {
-  struct sender_task tasks[DATAGRAMS_PER_SEC * (PING_TIMEOUT + 1)];
+  struct sender_args *args = ptr;
+  struct sender_task *tasks;
+  struct config *cnf;
+  size_t len;
   ipaddrl current;
   ipaddr end;
   int sock;
 
-  memset (tasks, 0, sizeof tasks);
-  struct sender_args *args = ptr;
+  cnf = args->conf;
+  len = cnf->datagrams_per_sec * (PING_TIMEOUT + 1);
+  tasks = calloc (len, sizeof (struct sender_task));
   sock = args->sock;
-  end = args->end;
+  end = cnf->end;
 
-  current = pings_next_unknown (args->start, end);
+  current = pings_next_unknown (cnf->begin, end);
   if (current > end) {
     log (LEVEL_WARN, "Sender has nothing to send. Exiting...");
     stop_working = 1;
@@ -255,7 +259,7 @@ start_sender (void *ptr)
     if (stop_working)
       break;
     int progress = 0;
-    for (size_t i = 0; i < CLEN (tasks); ++i) {
+    for (size_t i = 0; i < len; ++i) {
       struct sender_task *t = &tasks[i];
 
       // Calling break in here will quickly exit outer loop
@@ -267,12 +271,12 @@ start_sender (void *ptr)
         sleep_until (&t->time_next);
 
         // Task has no more sends, we mark it as "done"
-        if (t->num_sent == NUM_SENDS) {
+        if (t->num_sent == cnf->sends_per_addr) {
           pthread_mutex_lock (&ping_lock);
           pings[t->addr] |= P_DONE;
-          int num_replies = count_replies (pings[t->addr]);
+          int num_replies = count_replies (pings[t->addr], cnf->sends_per_addr);
           pthread_mutex_unlock (&ping_lock);
-          throughput_tick (num_replies, NUM_SENDS, t->addr);
+          throughput_tick (num_replies, cnf->sends_per_addr, t->addr);
           t->is_some = 0;
         }
       }
@@ -297,8 +301,9 @@ start_sender (void *ptr)
       int seq = t->num_sent;
       while (0 > ping_send (sock, t->addr, seq)) {
         // Not much we can do if this fails besides just wait and retry
+        // Main cause seems to be "Operation not permitted" and it's semi-frequent (for my VPS)
         log_source (LEVEL_ERROR, "ping_send");
-        sleep (5);
+        sleep (1);
       }
 
       // Set cooldown and num sent for future task completion
@@ -309,7 +314,7 @@ start_sender (void *ptr)
 
       // Wait to match DATAGRAMS_PER_SEC.
       struct timespec ts = { 0 };
-      ts.tv_nsec = (int)1e9 / DATAGRAMS_PER_SEC;
+      ts.tv_nsec = (int)1e9 / cnf->datagrams_per_sec;
       while (0 > nanosleep (&ts, &ts))
         ;
     }
@@ -346,7 +351,7 @@ start_receiver (void *ptr)
 
 /* Create a large number of threads to start working on network requests. */
 void
-start_workers (ipaddr start, ipaddr end)
+start_workers (struct config *conf)
 {
   pthread_t tids[2];
   int sock;
@@ -371,8 +376,7 @@ start_workers (ipaddr start, ipaddr end)
   // Provide sender with arguments
   struct sender_args args = {
     .sock = sock,
-    .start = start,
-    .end = end,
+    .conf = conf,
   };
   pthread_create (&tids[1], NULL, start_sender, &args);
   sem_wait (&sem_worker_inited);

@@ -1,3 +1,4 @@
+#include "config.h"
 #define _FILE_OFFSET_BITS 64
 
 #include <err.h>
@@ -16,7 +17,6 @@
 // Descriptor for opened ping file
 static int ping_fd;
 
-static void print_usage (void);
 static void ping_file_open (void);
 static void cleanup (void);
 
@@ -81,50 +81,21 @@ cleanup (void)
   msync (pings, IPV4_SIZE, MS_SYNC);
   munmap (pings, IPV4_SIZE);
   close (ping_fd);
-}
-
-static void
-print_usage (void)
-{
-  log (LEVEL_FATAL, "usage: storm [<start (hex)> <end (hex)>]");
+  fclose (log_file);
 }
 
 int
-main (int argc, char *argv[])
+main (void)
 {
-  unsigned long start, end;
+  struct config conf;
   const char *title, *attr;
   if (0 > get_titlecard(&title, &attr))
     log_source (LEVEL_ERROR, "get_titlecard");
   else
     printf ("%s\nPing Storm by Ben Neilsen\n\n%s\n%s\n\n", title, attr, TITLE_WEBSITE_ATTRIBUTION);
 
-  // Grab address range
-  if (argc == 1) {
-    // Default
-    start = 0;
-    end = UINT32_MAX;
-  } else if (argc == 3) {
-    // Custom
-    errno = 0;
-    char *stop1, *stop2;
-    stop1 = stop2 = NULL;
-    start = strtoul (argv[1], &stop1, 16);
-    end = strtoul (argv[2], &stop2, 16);
-    if (errno || !stop1 || !stop2 || stop1[0] != '\0'
-      || stop2[0] != '\0') {
-      print_usage ();
-      PANIC ("arguments may have non-hex characters");
-    }
-    CHECK (start > UINT32_MAX || end > UINT32_MAX);
-  } else {
-    print_usage ();
-    exit (EXIT_FAILURE);
-  }
-
-  log (LEVEL_INFO, "Arguments (%d): %8lX - %8lX", argc, start, end);
-
+  config_load ("config", &conf);
   ping_file_open ();
-  start_workers (start, end);
+  start_workers (&conf);
   cleanup ();
 }

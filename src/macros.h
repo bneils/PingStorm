@@ -14,4 +14,7 @@
 
 #define CLEN(arr) (sizeof (arr) / sizeof (*arr))
 
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+
 #endif

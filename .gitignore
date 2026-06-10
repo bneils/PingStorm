@@ -1,2 +1,4 @@
 bin/*
 *.dat
+*.log
+config

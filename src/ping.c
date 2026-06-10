@@ -6,7 +6,6 @@
 #include <errno.h>
 
 #include "ping.h"
-#include "worker.h"
 #include "macros.h"
 
 // synchronize access to the mapped file
@@ -80,10 +79,10 @@ ping_recv (int sock)
 }
 
 int
-count_replies (int bits)
+count_replies (int bits, int num_sends)
 {
   int count = 0;
-  for (int i = 0; i < NUM_SENDS; ++i)
+  for (int i = 0; i < num_sends; ++i)
     if (bits & SEQ_TO_BIT (i))
       count++;
   return count;

@@ -1,0 +1,9 @@
+# copy this to ./config
+#speed = '1000'
+#begin = '0'
+#end = 'ffffffff'
+#numsends = '3'
+#
+# consult logging.h for the level
+#logfilelevel = '2'
+#logfile = 'file.log'

@@ -34,7 +34,7 @@ char *ip_ntoa (ipaddr addr);
 int ping_send (int sock, ipaddr addr, int seq);
 int ping_recv (int sock);
 int socket_create (void);
-int count_replies (int bits);
+int count_replies (int bits, int num_sends);
 
 void ping_init (void);
 
