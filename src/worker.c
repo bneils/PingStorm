@@ -333,7 +333,7 @@ start_receiver (void *ptr)
 
   wlog (LEVEL_INFO, "Receive thread waiting for strays.");
   // Catch any strays
-  while (0 > ping_recv (sock))
+  while (0 <= ping_recv (sock))
     ;
 
   wlog (LEVEL_INFO, "Receive thread exiting...");
