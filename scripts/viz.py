@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import colorsys
 import sys
 import uuid
 
@@ -93,21 +94,73 @@ def vector_map(data, _map):
 ### END SOURCE
 
 
-def main():
-    if len(sys.argv) < 2:
-        sys.stderr.write(f"usage: {__file__} <dat>\n")
-        exit(1)
+def extract_reply_data(filename, width, num_sent):
+    buf_reads = 2**14
 
-    width = 2**12
+    with (
+        open(filename, "rb") as file,
+        tqdm.tqdm(total=2**32 / buf_reads) as progress,
+    ):
+        base_addr = 0
+        addrs_per_px_w = int(2**16 / width)
+        im_replies = np.zeros((width, width))
 
-    addrs_per_px = int(2**32 / width / width)
-    addrs_per_px_w = int(2**16 / width)
-    file = open(sys.argv[1], "rb")
-    num_sent = 4
+        count_bits = {i: bin(i)[2:].count("1") for i in range(2**num_sent)}
 
-    count_bits = {i: bin(i)[2:].count("1") for i in range(2**num_sent)}
-    im_replies = np.zeros((width, width))
+        while True:
+            buf = np.fromiter(file.read(buf_reads), dtype=np.uint8)
+            progress.update(1)
+            if not buf.size:
+                break
+            # Check buffer for any replies
+            # We can skip this buffer if there are no replies
+            replies = vector_map(buf >> 2, count_bits)
+            if not np.any(replies > 0):
+                base_addr += buf.size
+                continue
 
+            # The ip addresses we need to convert
+            # This code is quite slow, will be unbearable later on
+            addrs = np.arange(base_addr, base_addr + buf.size)
+
+            zipped = np.dstack([addrs, replies])[0]
+            filtered = np.where(zipped[:, 1] > 0)[0]
+            points = decode(zipped[filtered][:, 0], 2, 16) // addrs_per_px_w
+
+            # Should be refactored
+            for xy, r in zip(points, zipped[filtered][:, 1]):
+                x, y = xy
+                im_replies[y, x] += r
+                assert r <= num_sent, "r cannot exceed num_sent"
+            base_addr += buf.size
+    return im_replies
+
+
+def image_reply_heatmap(im_replies, width, num_sent):
+    with tqdm.tqdm(total=width) as progress:
+        pixels = np.zeros((width, width, 3), dtype=np.uint8)
+        addrs_per_px = int(2**32 / width / width)
+        color_map = [
+            tuple(
+                int(c * 255)
+                for c in colorsys.hsv_to_rgb(i / 256 * 2 / 3, 1, min(1.1 - i / 256, 1))
+            )
+            for i in range(256, 0, -1)
+        ]
+
+        for y in range(width):
+            progress.update(1)
+            for x in range(width):
+                # is at most addrx_per_px * num_sent.
+                avg_replies = im_replies[y, x] / addrs_per_px / num_sent
+                assert avg_replies <= 1, (
+                    "The amount of replies in this pixel far exceeds what is normal"
+                )
+                pixels[y, x] = color_map[int(min(avg_replies, 1) * 255)]
+        return pixels
+
+
+def pixels_fill_reserved(pixels, width):
     reserved_ranges = [
         (0xE0000000, 0xF0000000),
         (0xF0000000, 0xF0000000),
@@ -128,70 +181,45 @@ def main():
         (0xFFFFFFFF, 0xFFFFFFFF),
     ]
 
-    print("Extracting image data")
-    buf_reads = 2**14
-    progress = tqdm.tqdm(total=2**32 / buf_reads)
-    base_addr = 0
-    while True:
-        buf = np.fromiter(file.read(buf_reads), dtype=np.uint8)
-        progress.update(1)
-        if not buf.size:
-            break
-        # Check buffer for any replies
-        # We can skip this buffer if there are no replies
-        replies = vector_map(buf >> 2, count_bits)
-        if not np.any(replies > 0):
-            base_addr += buf.size
-            continue
-
-        # The ip addresses we need to convert
-        addrs = np.arange(base_addr, base_addr + buf.size)
-
-        zipped = np.dstack([addrs, replies])[0]
-        filtered = np.where(zipped[:, 1] > 0)[0]
-        points = decode(zipped[filtered][:, 0], 2, 16) // addrs_per_px_w
-
-        for xy, r in zip(points, zipped[filtered][:, 1]):
-            x, y = xy
-            im_replies[y, x] += r
-        base_addr += buf.size
-
-    print("Creating image")
-    pixels = []
-    progress = tqdm.tqdm(total=width)
-
-    for y in range(width):
-        row_pixels = []
-        progress.update(1)
-        for x in range(width):
-            lum = min(int(im_replies[y, x] / addrs_per_px / num_sent * 255), 255)
-            color = (lum, lum, lum)
-            row_pixels.append(color)
-        pixels.append(row_pixels)
-
-    print("Filling reserved regions")
     # Map the image's coordinates to IP address space.
     # Test each IP for a reserved range, coloring it appropriately
-    progress = tqdm.tqdm(total=width)
-    for y in range(width):
-        progress.update(1)
-        px_addrs = encode(
-            np.array([(x * addrs_per_px_w, y * addrs_per_px_w) for x in range(width)]),
-            2,
-            16,
-        )
-        for i, addr in enumerate(px_addrs):
-            for network, netmask in reserved_ranges:
-                if (addr & netmask) == network:
-                    x = i % width
-                    pixels[y][x] = (158, 89, 255)
-                    break
+    addrs_per_px_w = int(2**16 / width)
+    with tqdm.tqdm(total=width) as progress:
+        for y in range(width):
+            progress.update(1)
+            px_addrs = encode(
+                np.array(
+                    [(x * addrs_per_px_w, y * addrs_per_px_w) for x in range(width)]
+                ),
+                2,
+                16,
+            )
+            for i, addr in enumerate(px_addrs):
+                for network, netmask in reserved_ranges:
+                    if (addr & netmask) == network:
+                        x = i % width
+                        pixels[y, x] = (158, 89, 255)
+                        break
+    return pixels
 
-    pixeldata = np.asarray(pixels, dtype=np.uint8)
-    im = Image.fromarray(pixeldata, mode="RGB")
 
+def main():
+    if len(sys.argv) < 2:
+        sys.stderr.write(f"usage: {__file__} <dat>\n")
+        exit(1)
+
+    width = 2**13
+
+    print("Extracting image data")
+    im_replies = extract_reply_data(sys.argv[1], width, num_sent=4)
+    print("Creating image")
+    pixels = image_reply_heatmap(im_replies, width, num_sent=4)
+    print("Filling reserved regions")
+    pixels = pixels_fill_reserved(pixels, width)
+
+    # Write image to disk
+    im = Image.fromarray(pixels, mode="RGB")
     im.save("bin/pings.png")
-    file.close()
 
 
 if __name__ == "__main__":

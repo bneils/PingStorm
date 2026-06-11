@@ -1,8 +1,10 @@
-#include "logging.h"
 #include <stdarg.h>
 #include <malloc.h>
 #include <time.h>
 #include <pthread.h>
+
+#include "macros.h"
+#include "logging.h"
 
 FILE *log_file;
 int log_file_level = LEVEL_OFF;
@@ -47,6 +49,7 @@ wlog (int level, char *fmt, ...)
 
   if (level >= LOG_LEVEL) {
     FILE *f = LOG_FD (level);
+    ASSERT (f);
     fprintf (f, "%s ", log_level_strs_color[level]);
     vfprintf (f, fmt, args);
     fprintf (f, "\n");

@@ -12,4 +12,4 @@ bin/%.o: src/%.c src/*.h
 	$(CC) -o $@ -c $(CFLAGS) $<
 
 clean:
-	rm bin/*
+	rm bin/*.o
