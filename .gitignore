@@ -2,3 +2,4 @@ bin/*
 *.dat
 *.log
 config
+*.gz

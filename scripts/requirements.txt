@@ -1,0 +1,1 @@
+numpy-hilbert-curve == 1.*
