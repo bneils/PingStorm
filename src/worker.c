@@ -394,15 +394,14 @@ start_sender (void *ptr)
       clock_gettime (CLOCK_MONOTONIC_RAW, &now);
       long dsecs = now.tv_sec - last_sleep_time.tv_sec;
       long dnsecs = now.tv_nsec - last_sleep_time.tv_nsec;
-      if (dsecs > 0 || dnsecs >= ts.tv_nsec) {
+      if (dsecs > 0 || dnsecs >= ts.tv_nsec)
         ts.tv_nsec = 0;
-        continue;
-      } else {
+      else
         ts.tv_nsec -= dnsecs;
-      }
 
       while (0 > nanosleep (&ts, &ts))
         ;
+      // We need to set this value each loop otherwise the sleep gets factored out completely
       clock_gettime (CLOCK_MONOTONIC_RAW, &last_sleep_time);
     }
 
