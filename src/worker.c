@@ -271,6 +271,10 @@ start_sender (void *ptr)
   int sock;
   size_t total_pings_sent = 0;
   int adaptive_rate = cnf->datagrams_per_sec;
+  // using this to subtract from our periodic sleep the amount of time doing actual work
+  // important on CPU-limited systems
+  struct timespec last_sleep_time;
+  clock_gettime (CLOCK_MONOTONIC_RAW, &last_sleep_time);
 
   // We are consuming `datagrams_per_sec` in the circular array.
   // The time between subsequent accesses to the same cell is (len / datagrams_per_sec) => PING_TIMEOUT.
@@ -381,10 +385,25 @@ start_sender (void *ptr)
         continue;
 
       // Wait to match DATAGRAMS_PER_SEC.
-      struct timespec ts = { 0 };
+      struct timespec ts = { 0 }, now;
       ts.tv_nsec = SLEEP_INTERVAL_MS * (int)1e6;
+
+      // Subtract the amount of time that elapsed between sleeps from
+      // the next sleep. On CPU-limited systems, the work that was done
+      // may add a lot to our sleep. For faster systems this is marginal.
+      clock_gettime (CLOCK_MONOTONIC_RAW, &now);
+      long dsecs = now.tv_sec - last_sleep_time.tv_sec;
+      long dnsecs = now.tv_nsec - last_sleep_time.tv_nsec;
+      if (dsecs > 0 || dnsecs >= ts.tv_nsec) {
+        ts.tv_nsec = 0;
+        continue;
+      } else {
+        ts.tv_nsec -= dnsecs;
+      }
+
       while (0 > nanosleep (&ts, &ts))
         ;
+      clock_gettime (CLOCK_MONOTONIC_RAW, &last_sleep_time);
     }
 
     // Terminal condition (!progress means no pings were sent)
