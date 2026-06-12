@@ -4,6 +4,8 @@
 #include "ping.h"
 #include "config.h"
 
+#include <pthread.h>
+
 /* If you set this value too high, then the excess datagrams will likely
  * be dropped by a link along the path (the default gateway).
  * There's no way of detecting this, so it's safer to keep the value conservative.
@@ -21,6 +23,13 @@
 // Keep it no greater than NUM_REPLIES
 #define DEFAULT_NUM_SENDS 3
 
+#define PULSE_SEQ 100
+#define PULSE_CHECK_SECS 5
+#define PULSE_CHECK_EXPIR_SECS 60
+#define PULSE_IP 0x01010101
+
+extern int pulse_recv;
+extern pthread_mutex_t pulse_lock;
 extern const ipaddr special_subnets[17][2];
 
 void start_workers (struct config *conf);

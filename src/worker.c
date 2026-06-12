@@ -11,7 +11,12 @@
 #include "worker.h"
 #include "macros.h"
 #include "ping.h"
+#include "logging.h"
 #include "config.h"
+
+int pulse_recv;
+pthread_mutex_t pulse_lock = PTHREAD_MUTEX_INITIALIZER;
+static int pulse_sent;
 
 // This resource is increased when the main thread has collected messages
 // from all threads that they are initialized.
@@ -207,6 +212,9 @@ start_sender (void *ptr)
   struct sender_args *args = ptr;
   struct sender_task *tasks;
   struct config *cnf;
+  time_t last_pulse = time (NULL);
+  time_t last_health_check = time (NULL);
+  float pulse_health = 1;
   size_t len;
   ipaddrl current;
   ipaddr end;
@@ -250,6 +258,29 @@ start_sender (void *ptr)
       // Calling break in here will quickly exit outer loop
       if (stop_working)
         break;
+
+      // Send pulse ping
+      time_t pulse_time = time (NULL);
+      if (pulse_time - last_pulse >= PULSE_CHECK_SECS) {
+          last_pulse = pulse_time;
+          if (pulse_sent && pulse_time - last_health_check >= PULSE_CHECK_EXPIR_SECS) {
+              last_health_check = pulse_time;
+              pthread_mutex_lock (&pulse_lock);
+              // Check received value
+              pulse_health = (float)pulse_recv / pulse_sent;
+              int level;
+              if (pulse_health >= 0.8) level = LEVEL_INFO; // 0.8 - 1.0 is info
+              else if (pulse_health >= 0.5) level = LEVEL_WARN;  // 0.5 - 0.8 is warning
+              else level = LEVEL_ERROR; // 0.0 - 0.5 is error
+              wlog (level, "Ping health: %.1f%% (%d/%d)", 100 * pulse_health, pulse_recv, pulse_sent);
+              pulse_recv = pulse_sent = 0;
+              pthread_mutex_unlock (&pulse_lock);
+          }
+
+          // Send a pulse
+          pulse_sent++;
+          ping_send (sock, PULSE_IP, PULSE_SEQ);
+      }
 
       if (t->is_some) {
         // Task has no more sends, we mark it as "done"

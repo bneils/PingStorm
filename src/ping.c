@@ -7,6 +7,7 @@
 
 #include "ping.h"
 #include "macros.h"
+#include "worker.h"
 
 // synchronize access to the mapped file
 pthread_mutex_t ping_lock;
@@ -61,6 +62,14 @@ ping_recv (int sock)
 
   // Check source IP of received packet.
   sender_addr = ntohl (sender_saddr.sin_addr.s_addr);
+
+  // The sender thread will have sent a pulse, so we need to receive it
+  if (seq == PULSE_SEQ) {
+    pthread_mutex_lock (&pulse_lock);
+    pulse_recv++;
+    pthread_mutex_unlock (&pulse_lock);
+    return 0;
+  }
 
   // Check sequence number of ICMP packet for bounds
   // If OOB then this packet is invalid / ignored
