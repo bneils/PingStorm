@@ -18,6 +18,8 @@ int pulse_recv;
 pthread_mutex_t pulse_lock = PTHREAD_MUTEX_INITIALIZER;
 static int pulse_sent;
 
+static int adaptive_rate_tick(int *adaptive_rate, int rate);
+
 // This resource is increased when the main thread has collected messages
 // from all threads that they are initialized.
 static sem_t sem_worker_begin;
@@ -206,21 +208,69 @@ register_handler (void)
     CHECK (0 > sigaction (signals[i], &act, NULL));
 }
 
+
+/* Conditionally update the adaptive rate based on the current pulse health checks.
+ * This function may adjust the adaptive rate that is bounded by rate.
+ * The shared values pulse_sent and pulse_recv are atomically reset on an update.
+ * Returns 1 upon the adaptive rate changing. 0 on no change.
+ */
+static int
+adaptive_rate_tick(int *adaptive_rate, int rate)
+{
+  int level;
+  float pulse_health;
+
+  if (pulse_sent < PULSE_SAMPLE_SIZE)
+    return 0;
+
+  pthread_mutex_lock (&pulse_lock);
+  // Check health of the connection
+  pulse_health = (float)pulse_recv / pulse_sent;
+
+  // Adapt the send rate based on the ping health
+  if (pulse_health >= 0.75) {
+    level = LEVEL_INFO;
+    *adaptive_rate /= HEALTH_FAILED_SCALE;
+    // The adaptive rate was 0 (because we encountered an error)
+    if (0 == *adaptive_rate) {
+      // Set it to such a value that if it continues to pass health checks,
+      // it will bounce back to the normal rate after N checks.
+      *adaptive_rate = rate;
+      for (int i = 0; i < HEALTH_RECOVERY_STEPS; ++i)
+        *adaptive_rate *= HEALTH_FAILED_SCALE;
+    }
+    // Make sure it doesn't exceed our actual rate
+    *adaptive_rate = MIN(*adaptive_rate, rate);
+  } else if (pulse_health >= 0.3) {
+    level = LEVEL_WARN;
+    *adaptive_rate *= HEALTH_FAILED_SCALE;
+  } else {
+    // Anything below this is considered an error and signals
+    // that we are potentially being firewalled.
+    // Since we cannot tell if a drop rule is in place (versus a reject rule),
+    // we need to pause our sending
+    *adaptive_rate = 0;
+    level = LEVEL_ERROR;
+  }
+  wlog (level, "Health (%.1f%%, %d/%d). AR: %d", 100 * pulse_health, pulse_recv, pulse_sent, *adaptive_rate);
+  pulse_recv = pulse_sent = 0;
+  pthread_mutex_unlock (&pulse_lock);
+  return 1;
+}
+
 void *
 start_sender (void *ptr)
 {
   struct sender_args *args = ptr;
   struct sender_task *tasks;
-  struct config *cnf;
+  struct config *cnf = args->conf;
   time_t last_pulse = time (NULL);
-  time_t last_health_check = time (NULL);
-  float pulse_health = 1;
   size_t len;
   ipaddrl current;
   ipaddr end;
   int sock;
-
-  cnf = args->conf;
+  size_t total_pings_sent = 0;
+  int adaptive_rate = cnf->datagrams_per_sec;
 
   // We are consuming `datagrams_per_sec` in the circular array.
   // The time between subsequent accesses to the same cell is (len / datagrams_per_sec) => PING_TIMEOUT.
@@ -242,10 +292,9 @@ start_sender (void *ptr)
 
   wlog (LEVEL_INFO, "Send thread started at %s", ip_ntoa (current));
 
-  // Specifies that our sleeps should be in 50ms intervals.
-  // Selecting a higher intervals means sleeping less often.
-  const int sleep_interval = 50;
-  size_t sleep_quotient = sleep_interval * cnf->datagrams_per_sec / 1000;
+  // This value is recalculated on adaptive rate changes.
+  // sleep_quotient _CAN_ be equal to 0!!! CHECK AGAINST THIS!
+  size_t sleep_quotient = SLEEP_INTERVAL_MS * adaptive_rate / 1000;
   ASSERT (sleep_quotient < len);
 
   for (;;) {
@@ -259,23 +308,15 @@ start_sender (void *ptr)
       if (stop_working)
         break;
 
-      // Send pulse ping
+      // Send pulse ping and adjust the adaptive rate
       time_t pulse_time = time (NULL);
       if (pulse_time - last_pulse >= PULSE_CHECK_SECS) {
           last_pulse = pulse_time;
-          if (pulse_sent && pulse_time - last_health_check >= PULSE_CHECK_EXPIR_SECS) {
-              last_health_check = pulse_time;
-              pthread_mutex_lock (&pulse_lock);
-              // Check received value
-              pulse_health = (float)pulse_recv / pulse_sent;
-              int level;
-              if (pulse_health >= 0.8) level = LEVEL_INFO; // 0.8 - 1.0 is info
-              else if (pulse_health >= 0.5) level = LEVEL_WARN;  // 0.5 - 0.8 is warning
-              else level = LEVEL_ERROR; // 0.0 - 0.5 is error
-              wlog (level, "Ping health: %.1f%% (%d/%d)", 100 * pulse_health, pulse_recv, pulse_sent);
-              pulse_recv = pulse_sent = 0;
-              pthread_mutex_unlock (&pulse_lock);
-          }
+
+          // This may change the adaptive rate so we need to adjust the
+          // sleep quotient in response
+          if (adaptive_rate_tick(&adaptive_rate, cnf->datagrams_per_sec))
+            sleep_quotient = SLEEP_INTERVAL_MS * adaptive_rate / 1000;
 
           // Send a pulse
           pulse_sent++;
@@ -310,6 +351,14 @@ start_sender (void *ptr)
       if (!t->is_some)
         continue;
 
+      // This value is equal to zero if our send rate is zero.
+      // We can check either, but this is used since we want to
+      // explicitly avoid dividing by zero later on.
+      if (sleep_quotient == 0) {
+        sleep (1);
+        continue;
+      }
+
       // Send the ping and reset the cooldown
       int seq = t->num_sent;
       while (0 > ping_send (sock, t->addr, seq)) {
@@ -323,14 +372,17 @@ start_sender (void *ptr)
       clock_gettime (CLOCK_MONOTONIC_RAW, &t->time_next);
       t->time_next.tv_sec += PING_TIMEOUT;
       t->num_sent++;
+      total_pings_sent++;
       progress = 1;
 
-      if (i % sleep_quotient != 0)
+      // We use the total number of pings sent in the numerator to be
+      // (potentially) more accurate in our sleep periodic-ness
+      if (total_pings_sent % sleep_quotient != 0)
         continue;
 
       // Wait to match DATAGRAMS_PER_SEC.
       struct timespec ts = { 0 };
-      ts.tv_nsec = sleep_interval * (int)1e6;
+      ts.tv_nsec = SLEEP_INTERVAL_MS * (int)1e6;
       while (0 > nanosleep (&ts, &ts))
         ;
     }

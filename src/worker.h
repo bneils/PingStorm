@@ -24,9 +24,19 @@
 #define DEFAULT_NUM_SENDS 3
 
 #define PULSE_SEQ 100
-#define PULSE_CHECK_SECS 5
-#define PULSE_CHECK_EXPIR_SECS 60
+#define PULSE_CHECK_SECS 1
+#define PULSE_SAMPLE_SIZE 20
 #define PULSE_IP 0x01010101
+
+// Specifies that our sleeps should be in certain sized intervals.
+// Selecting a higher intervals means sleeping less often.
+#define SLEEP_INTERVAL_MS 50
+
+// The percent to scale the sending rate when a health check fails.
+// A value of 0.75 means to cut back 25%
+#define HEALTH_FAILED_SCALE 0.75
+
+#define HEALTH_RECOVERY_STEPS 5
 
 extern int pulse_recv;
 extern pthread_mutex_t pulse_lock;
