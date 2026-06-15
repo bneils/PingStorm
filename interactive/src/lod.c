@@ -11,6 +11,7 @@
 #include "../../src/macros.h"
 
 #define IPV4_SIZE (1UL << 32)
+#define NUM_SENT 4
 #define LOD_SIZE ((4 * IPV4_SIZE - 1) / 3)
 
 /* Reads data from the ping path and writes it to the LOD file (1st parameter).
@@ -78,7 +79,7 @@ lod_create (const char *lod_path, const char *ping_path)
       // Count the number of bits quickly with fewest # of memory accesses
       lod[lod_idx] =
         ((rdata >> 5) + (rdata >> 4 & 1) + (rdata >> 3 & 1) + \
-        (rdata >> 2 & 1) + (rdata >> 1 & 1) + (rdata & 1)) * 255 / 6;
+        (rdata >> 2 & 1) + (rdata >> 1 & 1) + (rdata & 1)) * 255 / NUM_SENT;
       hilbert_incr (2, 16, coords);
     }
   }

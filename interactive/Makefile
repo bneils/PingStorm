@@ -2,7 +2,7 @@ NAME=bin/interactive
 CC=gcc
 OBJS=$(shell ls src/*.c | sed -e 's/\.c/\.o/' -e 's/src\//bin\//')
 OBJS+=bin/logging.o
-CFLAGS=-Wall -Wextra -O3 -g -lSDL3
+CFLAGS=-Wall -Wextra -O3 -g -lSDL3 -lm
 
 .PHONY: clean
 

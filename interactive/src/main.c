@@ -5,14 +5,17 @@
 #include <SDL3/SDL_pixels.h>
 #include <SDL3/SDL_rect.h>
 #include <SDL3/SDL_surface.h>
+#include <bits/time.h>
 #include <stdint.h>
+#include <math.h>
+#include <time.h>
 #include "../../src/macros.h"
 #include "hilbert.h"
 #include "lod.h"
 #include "color.h"
 
 #define WINDOW_TITLE "Internet Browser"
-#define SCREEN_WIDTH 1024
+#define SCREEN_WIDTH 750
 
 /*
  * Use a quad tree to select what pixels to give for a certain resolution.
@@ -58,53 +61,64 @@ int_log (unsigned x)
 }
 
 void
-lod_render (FILE *lod, SDL_Surface *surface, int ax, int ay, int aw, int ah)
+lod_render (FILE *lod, SDL_Renderer *renderer, SDL_Surface *surface, int64_t real_x, int64_t real_y, int64_t real_w, int64_t real_h)
 {
-  if (!surface->w)
-    return;
+  ASSERT (real_h > 0 && real_w > 0);
 
-  // How many addresses are supposed to be in a pixel, width-wise
-  uint64_t density = aw / surface->w;
+  // Fill background
+  SDL_Rect rect = {0, 0, surface->w, surface->h};
+  SDL_FillSurfaceRect (surface, &rect, SDL_MapSurfaceRGB (surface, 0, 0, 0));
 
   // We need to pick a level of detail
-  size_t lod_base = 0;            // where the lod starts in the file.
-  size_t lod_size = (1UL << 32);  // size of the lod level.
-  size_t lod_width = (1 << 16);   // how many entries wide the lod level is.
+  int64_t lod_base = 0;            // where the lod starts in the file.
+  int64_t lod_size = (1UL << 32);  // size of the lod level.
+  int64_t lod_width = (1 << 16);   // how many entries wide the lod level is.
 
   // We take the order of the most significant bit and use that as the LOD level.
   // The variable being shifted here _must_ be unsigned.
-  int scale = 1;
-  while (density >>= 1) {
+  // How many addresses are supposed to be in a pixel, width-wise
+  uint32_t scale = 1;
+  int lod_levels = round (log2 ((double) real_w / surface->w));
+  if (lod_levels > 15)
+    lod_levels = 15;
+  for (int i = 0; i < lod_levels; ++i) {
     lod_base += lod_size;
     lod_size /= 4;
     lod_width /= 2;
     scale *= 2;
   }
 
-  SDL_Rect rect = {0, 0, surface->w, surface->h};
-  const SDL_PixelFormatDetails *format_details = SDL_GetPixelFormatDetails(surface->format);
-  SDL_FillSurfaceRect(surface, &rect, SDL_MapRGB(format_details, NULL, 0, 100, 0));
-
   // Determine the width of each LOD.
-  double cells_draw_width = (double)aw / scale;
-  double cell_draw_width = (double)surface->w / cells_draw_width;
+  double cell_draw_width = ((double)surface->w / real_w) * scale;
 
-  // Determine the starting screen position (zero or negative)
-  // of the LOD bits.
+  //wlog (LEVEL_DEBUG, "cdw: %lf", cell_draw_width);
 
-  ay /= scale;
-  ax /= scale;
-  aw /= scale;
-  ah /= scale;
+  // The LOD map has smaller dimensions than our real coordinates,
+  // so we should map ours down. Note: these values may be negative.
+  // A negative value symbols that the LOD starts at a positive offset
+  // from the top left.
+  int64_t lod_x1 = real_x / scale;
+  int64_t lod_y1 = real_y / scale;
+  int64_t lod_x2 = lod_x1 + real_w / scale;
+  int64_t lod_y2 = lod_y1 + real_h / scale;
 
-  // Initialize LOD index to the top-left of the viewed region
-  size_t lod_idx = lod_base + ay * lod_width + ax;
+  int64_t scr_y_off = -lod_y1 * cell_draw_width;
+  int64_t scr_x_off = -lod_x1 * cell_draw_width;
 
-  wlog (LEVEL_DEBUG, "cell width: %lf", cell_draw_width);
-  wlog (LEVEL_DEBUG, "cells width: %lf", cells_draw_width);
-  wlog (LEVEL_DEBUG, "cell height: %d, cell width: %d", ah, aw);
-  wlog (LEVEL_DEBUG, "scale: %d",scale);
+  lod_x1 = MAX (lod_x1, 0);
+  lod_y1 = MAX (lod_y1, 0);
+  lod_x1 = MIN (lod_x1, lod_width);
+  lod_y1 = MIN (lod_y1, lod_width);
 
+  lod_x2 = MAX (lod_x2, 0);
+  lod_y2 = MAX (lod_y2, 0);
+  lod_x2 = MIN (lod_x2, lod_width);
+  lod_y2 = MIN (lod_y2, lod_width);
+
+  // Get the starting index
+  int64_t lod_idx = lod_base + lod_y1 * lod_width + lod_x1;
+
+  // Build the color table
   uint32_t color_table[256];
   for (int i = 0; i < 256; ++i) {
     unsigned lum = i;
@@ -119,26 +133,35 @@ lod_render (FILE *lod, SDL_Surface *surface, int ax, int ay, int aw, int ah)
     };
 
     struct rgb out = HsvToRgb(color);
-    color_table[i] = SDL_MapRGB(format_details, NULL, out.r, out.g, out.b);
+    color_table[i] = SDL_MapSurfaceRGB(surface, out.r, out.g, out.b);
   }
 
-  for (int rel_y = 0; rel_y < ah; ++rel_y) {
+  // Begin drawing
+  for (int64_t lod_yit = lod_y1; lod_yit < lod_y2; ++lod_yit) {
     // Jump to LOD file address of first pixel in the row
     fseek (lod, lod_idx, SEEK_SET);
 
-    for (int rel_x = 0; rel_x < aw; ++rel_x) {
+    for (int64_t lod_xit = lod_x1; lod_xit < lod_x2; ++lod_xit) {
       // Read the corresponding LOD value and convert it to a color.
       unsigned char val;
-      ASSERT (fread (&val, sizeof (val), 1, lod));
+      if (!fread (&val, sizeof (val), 1, lod))
+        return;
       uint32_t color = color_table[val];
 
       // Fill the LOD where it sits on the screen
-      SDL_Rect rect;
-      rect.y = cell_draw_width * rel_y;
-      rect.x = cell_draw_width * rel_x;
-      rect.w = cell_draw_width < 1 ? 1 : cell_draw_width;
-      rect.h = cell_draw_width < 1 ? 1 : cell_draw_width;
-      SDL_FillSurfaceRect(surface, &rect, color);
+      int64_t scr_wid = ceil (cell_draw_width < 0.001 ? 1 : cell_draw_width);
+
+      float scr_x = cell_draw_width * lod_xit + scr_x_off;
+      float scr_y = cell_draw_width * lod_yit + scr_y_off;
+
+      SDL_Rect rect = {
+        .x = scr_x,
+        .y = scr_y,
+        .w = scr_wid,
+        .h = scr_wid,
+      };
+      SDL_FillSurfaceRect (surface, &rect, color);
+
     }
     lod_idx += lod_width;
   }
@@ -157,12 +180,13 @@ main (void)
   ASSERT (SDL_InitSubSystem (SDL_INIT_VIDEO));
   SDL_Window *window = ASSERT_NOT (SDL_CreateWindow (WINDOW_TITLE, SCREEN_WIDTH, SCREEN_WIDTH, 0), NULL);
   SDL_Surface *surface = ASSERT_NOT (SDL_GetWindowSurface (window), NULL);
+  SDL_Renderer *renderer = ASSERT_NOT (SDL_GetRenderer (window), NULL);
 
-  int w = 1 << 12, x = 0, y = 0;
+  float w = 1 << 16, x = 0, y = 0;
 
   for (;;) {
     SDL_Event e;
-    int dx = w > 10 ? w / 10 : 1;
+    int dx = ceil (w / 10);
 
   	while (SDL_PollEvent(&e)) {
   		switch (e.type) {
@@ -186,12 +210,12 @@ main (void)
             x += dx;
             break;
           case SDL_SCANCODE_E:
-            if (w > 2)
-              w /= 2;
+            if (w > 1)
+              w /= 1.5;
             break;
           case SDL_SCANCODE_Q:
-            if (w < (1 << 17))
-              w *= 2;
+            if (w < (1 << 20))
+              w *= 1.5;
             break;
           default:
             break;
@@ -200,7 +224,21 @@ main (void)
   		}
   	}
 
-    lod_render (lod_file, surface, x, y, w, w);
+    if (x < -(1 << 15)) x = -(1 << 15);
+    else if (x > (1 << 17)) x = 1 << 17;
+    if (y < -(1 << 15)) y = -(1 << 15);
+    else if (y > (1 << 17)) y = 1 << 17;
+
+    struct timespec start, end;
+    clock_gettime (CLOCK_MONOTONIC_RAW, &start);
+    lod_render (lod_file, renderer, surface, x - w / 2, y - w / 2, w, w);
+    clock_gettime (CLOCK_MONOTONIC_RAW, &end);
+    long diffmsec = (end.tv_nsec - start.tv_nsec) / 1e6;
+    if (end.tv_sec > start.tv_sec)
+      diffmsec += 1e3;
+
+    //wlog (LEVEL_DEBUG, "%ld ms\n", diffmsec);
+
     ASSERT (SDL_UpdateWindowSurface (window));
   	SDL_Delay(20);
   }
