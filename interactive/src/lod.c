@@ -92,7 +92,15 @@ lod_create (const char *lod_path, const char *ping_path)
     for (size_t i = start; i < end; i += len * 2)
       // Iterate the first of two rows, by 2
       for (size_t j = i; j < i + len; j += 2) {
-        unsigned int avg = (lod[j] + lod[j + 1] + lod[j + len] + lod[j + len + 1]) / 4;
+        unsigned char a, b, c, d;
+        a = lod[j];
+        b = lod[j + 1];
+        c = lod[j + len];
+        d = lod[j + len + 1];
+        int deno = (a != 0) + (b != 0) + (c != 0) + (d != 0);
+        deno += (deno == 0);
+        // average only the non-zero elements.
+        unsigned int avg = (a + b + c + d) / deno;
         lod[dst++] = avg;
       }
     start = end;

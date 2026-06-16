@@ -136,6 +136,16 @@ lod_render (FILE *lod, SDL_Renderer *renderer, SDL_Surface *surface, int64_t rea
     color_table[i] = SDL_MapSurfaceRGB(surface, out.r, out.g, out.b);
   }
 
+  int64_t scr_wid = ceil (cell_draw_width < 0.001 ? 1 : cell_draw_width);
+  SDL_Rect scr_rect = {
+    .x = 0,
+    .y = 0,
+    .w = scr_wid,
+    .h = scr_wid,
+  };
+
+  const SDL_PixelFormatDetails *details = SDL_GetPixelFormatDetails (surface->format);
+
   // Begin drawing
   for (int64_t lod_yit = lod_y1; lod_yit < lod_y2; ++lod_yit) {
     // Jump to LOD file address of first pixel in the row
@@ -146,22 +156,17 @@ lod_render (FILE *lod, SDL_Renderer *renderer, SDL_Surface *surface, int64_t rea
       unsigned char val;
       if (!fread (&val, sizeof (val), 1, lod))
         return;
-      uint32_t color = color_table[val];
-
       // Fill the LOD where it sits on the screen
-      int64_t scr_wid = ceil (cell_draw_width < 0.001 ? 1 : cell_draw_width);
-
-      float scr_x = cell_draw_width * lod_xit + scr_x_off;
-      float scr_y = cell_draw_width * lod_yit + scr_y_off;
-
-      SDL_Rect rect = {
-        .x = scr_x,
-        .y = scr_y,
-        .w = scr_wid,
-        .h = scr_wid,
-      };
-      SDL_FillSurfaceRect (surface, &rect, color);
-
+      scr_rect.x = cell_draw_width * lod_xit + scr_x_off;
+      scr_rect.y = cell_draw_width * lod_yit + scr_y_off;
+      if (cell_draw_width > 1) {
+        SDL_FillSurfaceRect (surface, &scr_rect, color_table[val]);
+      } else if (scr_rect.y >= 0 && scr_rect.y < surface->h && scr_rect.x >= 0 && scr_rect.x < surface->w &&
+        scr_rect.y + scr_rect.h < surface->h && scr_rect.x + scr_rect.w < surface->w) {
+        uint64_t idx = details->bytes_per_pixel * (surface->w * scr_rect.y + scr_rect.x);
+        //wlog (LEVEL_DEBUG, "Accessing raw buffer");
+        *(uint32_t *)(surface->pixels + idx) = color_table[val];
+      }
     }
     lod_idx += lod_width;
   }
@@ -185,6 +190,9 @@ main (void)
   float w = 1 << 16, x = 0, y = 0;
 
   for (;;) {
+    struct timespec start, end;
+    clock_gettime (CLOCK_MONOTONIC_RAW, &start);
+
     SDL_Event e;
     int dx = ceil (w / 10);
 
@@ -229,17 +237,20 @@ main (void)
     if (y < -(1 << 15)) y = -(1 << 15);
     else if (y > (1 << 17)) y = 1 << 17;
 
-    struct timespec start, end;
-    clock_gettime (CLOCK_MONOTONIC_RAW, &start);
+
     lod_render (lod_file, renderer, surface, x - w / 2, y - w / 2, w, w);
+
     clock_gettime (CLOCK_MONOTONIC_RAW, &end);
     long diffmsec = (end.tv_nsec - start.tv_nsec) / 1e6;
     if (end.tv_sec > start.tv_sec)
       diffmsec += 1e3;
 
-    //wlog (LEVEL_DEBUG, "%ld ms\n", diffmsec);
+    wlog (LEVEL_DEBUG, "%ld fps\n", 1000 / (diffmsec+1));
 
     ASSERT (SDL_UpdateWindowSurface (window));
-  	SDL_Delay(20);
+
+    long delay = 20 - diffmsec;
+    if (delay > 0)
+     	SDL_Delay(delay);
   }
 }
