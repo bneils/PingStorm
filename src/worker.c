@@ -368,7 +368,13 @@ start_sender (void *ptr)
       while (0 > ping_send (sock, t->addr, seq)) {
         // Not much we can do if this fails besides just wait and retry
         // Main cause seems to be "Operation not permitted" and it's semi-frequent (for my VPS)
-        log_source (LEVEL_ERROR, "ping_send");
+        if (errno == EPERM) {
+            adaptive_rate *= HEALTH_FAILED_SCALE * HEALTH_FAILED_SCALE;
+            sleep_quotient = SLEEP_INTERVAL_MS * adaptive_rate / 1000;
+            wlog (LEVEL_WARN, "Received EPERM. AR=%d", adaptive_rate);
+        } else {
+            log_source (LEVEL_ERROR, "ping_send");
+        }
         sleep (1);
       }
 
