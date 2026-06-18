@@ -368,6 +368,9 @@ start_sender (void *ptr)
       while (0 > ping_send (sock, t->addr, seq)) {
         // Not much we can do if this fails besides just wait and retry
         // Main cause seems to be "Operation not permitted" and it's semi-frequent (for my VPS)
+
+        // It seems like this error is from iptables.
+        // https://groups.google.com/g/comp.protocols.tcp-ip/c/Qou9Sfgr77E
         if (errno == EPERM) {
             adaptive_rate *= HEALTH_FAILED_SCALE * HEALTH_FAILED_SCALE;
             sleep_quotient = SLEEP_INTERVAL_MS * adaptive_rate / 1000;

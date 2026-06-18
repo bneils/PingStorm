@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import colorsys
+import os
 import sys
 
 # required libraries:
@@ -8,12 +9,15 @@ import sys
 import numpy as np
 import pyvips
 import tqdm
-from hilbert import decode, encode
+from hilbert import decode
 from pyvips.enums import ForeignTiffCompression
 
 NUM_SENT = 4
 HILBERT_NDIMS = 2
 HILBERT_NBITS = 16
+
+# After running this script you may want to drop caches: (slab objects and pagecache)
+#   echo 3 | sudo tee /proc/sys/vm/drop_caches
 
 
 def write_image_data(filename, im_data):
@@ -22,9 +26,9 @@ def write_image_data(filename, im_data):
     the pixel data must be memory-mapped to disk.
     """
     file = open(filename, "rb")
-    buf_reads = 2**14
+    buf_reads = 2**15
     progress = tqdm.tqdm(total=2**32 / buf_reads)
-    base_addr = 0
+    next_addr = 0
 
     color_map = np.array(
         [
@@ -35,54 +39,83 @@ def write_image_data(filename, im_data):
                 )
             )
             for i in range(256)
-        ]
+        ],
+        dtype=np.uint8,
+    )
+
+    sample_width = 8
+    averages = np.zeros(
+        (2**16 // sample_width, 2**16 // sample_width), dtype=np.float16
     )
 
     while True:
-        buf = np.fromiter(file.read(buf_reads), dtype=np.uint8)
+        base_addr = next_addr
+        buf = np.frombuffer(file.read(buf_reads), dtype=np.uint8)
+        next_addr += buf.size
+
         progress.update(1)
         if not buf.size:
             break
 
-        # Convert the sequenced reply data in each byte to an integer number of replies.
-        # Discard the metadata bits and then shift in a loop, summing the bits
+        # We can skip this buffer if there are no replies
+        # Do not modify image buffer if replies is empty, but do advance the address
         replydata = buf >> 2
-        replies = np.zeros(replydata.size)
+        if not np.any(replydata):
+            continue
+
+        # Count the number of bits and then you have the reply counts
+        # Discard the metadata bits and then you have the reply bits.
+        replies = np.zeros(replydata.size, dtype=np.uint8)
         for i in range(NUM_SENT):
             replies += replydata & 1
             replydata >>= 1
 
-        # We can skip this buffer if there are no replies
-        # Do not modify image buffer if replies is empty, but do advance the address
-        if not np.any(replies > 0):
-            base_addr += buf.size
-            continue
+        # Create mask for only the replies with a positive count.
+        mask = replies > 0
+        replies = replies[mask]
 
         # The IP addresses corresponding with the buffer we read.
-        addrs = np.arange(base_addr, base_addr + buf.size)
-
-        # Only iterate over the replied addresses
-        pairs = np.dstack((addrs, replies))[0]
-        replied_pairs = pairs[pairs[:, 1] > 0]
+        # Get the indices of the true values (offsets) and add the base address.
+        addrs = np.where(mask)[0] + base_addr
 
         # Convert to 2d Hilbert coordinates and pixel values
-        hilbert_pts = decode(replied_pairs[:, 0], HILBERT_NDIMS, HILBERT_NBITS)
-        pixel_values = replied_pairs[:, 1].astype(np.uint8, copy=False) * (
-            255 // NUM_SENT
-        )
-        pixel_values = color_map[pixel_values]
-        # Assign the pixel values to coordinates in bulk
-        im_data[hilbert_pts[:, 1], hilbert_pts[:, 0]] = pixel_values
+        hilbert_pts = decode(addrs, HILBERT_NDIMS, HILBERT_NBITS)
 
-        base_addr += buf.size
+        # Assign the pixel values to coordinates in bulk
+        np.add.at(
+            averages,
+            (hilbert_pts[:, 1] // sample_width, hilbert_pts[:, 0] // sample_width),
+            replies * (255 / (NUM_SENT * sample_width**2)),
+        )
+
+        lum = replies * (255 // NUM_SENT * 2 / 3) + (255 // 3)
+        im_data[hilbert_pts[:, 1], hilbert_pts[:, 0]] = np.column_stack((lum, lum, lum))
 
     file.close()
+    progress.close()
+
+    print("Filling averaged color data")
+    progress = tqdm.tqdm(total=averages.shape[0])
+
+    averages_color = color_map[averages.astype(dtype=np.uint8)]
+    w = sample_width
+    for y in range(averages.shape[0]):
+        progress.update(1)
+        for x in range(averages.shape[1]):
+            x1, y1 = x * w, y * w
+            x2, y2 = x1 + w, y1 + w
+            im_data[y1:y2, x1:x2] = (
+                im_data[y1:y2, x1:x2]
+                / 255
+                * np.repeat([averages_color[y, x]], w * w, axis=0).reshape(w, w, 3)
+            ).astype(np.uint8)
+
     progress.close()
 
     return im_data
 
 
-def pixels_fill_reserved(pixels, width):
+def pixels_fill_reserved(im_data):
     reserved_ranges = [
         (0xE0000000, 0xF0000000),
         (0xF0000000, 0xF0000000),
@@ -103,27 +136,6 @@ def pixels_fill_reserved(pixels, width):
         (0xFFFFFFFF, 0xFFFFFFFF),
     ]
 
-    # Map the image's coordinates to IP address space.
-    # Test each IP for a reserved range, coloring it appropriately
-    addrs_per_px_w = int(2**16 / width)
-    with tqdm.tqdm(total=width) as progress:
-        for y in range(width):
-            progress.update(1)
-            px_addrs = encode(
-                np.array(
-                    [(x * addrs_per_px_w, y * addrs_per_px_w) for x in range(width)]
-                ),
-                2,
-                16,
-            )
-            for i, addr in enumerate(px_addrs):
-                for network, netmask in reserved_ranges:
-                    if (addr & netmask) == network:
-                        x = i % width
-                        pixels[y, x] = (158, 89, 255)
-                        break
-    return pixels
-
 
 def main():
     if len(sys.argv) < 2:
@@ -139,22 +151,22 @@ def main():
     write_image_data(sys.argv[1], arr)
     arr.flush()
 
-    # arr = np.memmap("image.dat", mode="r", shape=(2**16, 2**16, 3))
-
     # Write image to disk
     print("Converting image to TIFF")
     image = pyvips.Image.new_from_array(arr, interpretation="rgb")
 
     # image.write_to_file("output.tif")
     image.tiffsave(
-        "output.tiff",
+        "bin/echo_map.tiff",
         compression=ForeignTiffCompression.DEFLATE,
         tile=True,
         pyramid=True,
         bigtiff=True,
     )
 
-    print("Saved. You may delete image.dat now.")
+    os.remove("image.dat")
+
+    print("Done. Deleted cached file image.dat")
 
 
 if __name__ == "__main__":
