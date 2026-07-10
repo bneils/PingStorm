@@ -371,10 +371,23 @@ start_sender (void *ptr)
 
         // It seems like this error is from iptables.
         // https://groups.google.com/g/comp.protocols.tcp-ip/c/Qou9Sfgr77E
+        // EPERM is not documented in sendto, so this is probably an OS warning to slow down.
         if (errno == EPERM) {
             adaptive_rate *= HEALTH_FAILED_SCALE * HEALTH_FAILED_SCALE;
             sleep_quotient = SLEEP_INTERVAL_MS * adaptive_rate / 1000;
             wlog (LEVEL_WARN, "Received EPERM. AR=%d", adaptive_rate);
+        } else if (errno == EACCES) {
+            // This is a **VERY** fringe error, which I should've handled long ago. Here's the story:
+            // This program was running on a VPS which had its own public IP within a public subnet. Eventually the
+            // program tried to ping its own network broadcast address, which raised the unhandled EACCES and entered
+            // a loop of attempting to ping its network address and getting stopped by the `sendto` function.
+            // This hung the program for 2 days.
+            // You shouldn't get this under a NAT since private addresses are skipped over.
+
+            // "(For UDP sockets) An attempt was made to send to a network/broadcast address
+            // as though it was a unicast address"
+            wlog (LEVEL_ERROR, "Network broadcast address. Skipping.");
+            break;
         } else {
             log_source (LEVEL_ERROR, "ping_send");
         }
