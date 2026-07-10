@@ -35,7 +35,9 @@ def write_image_data(filename, im_data):
             tuple(
                 int(c * 255)
                 for c in colorsys.hsv_to_rgb(
-                    (1 - (i / 256)) * 0.9, 1, min(i / 256 + 0.2, 0.8)
+                    (1 - (i / 256)) * 2 / 3,
+                    1,
+                    1,  # min(i / 256 + 0.2, 0.8)
                 )
             )
             for i in range(256)

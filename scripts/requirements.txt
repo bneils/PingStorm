@@ -1,1 +1,4 @@
 numpy-hilbert-curve == 1.*
+numpy == 2.*
+tqdm == 4.*
+pyvips == 3.*
