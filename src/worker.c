@@ -302,15 +302,13 @@ start_sender (void *ptr)
   ASSERT (sleep_quotient < len);
 
   for (;;) {
-    if (stop_working)
-      break;
     int progress = 0;
     for (size_t i = 0; i < len; ++i) {
       struct sender_task *t = &tasks[i];
 
       // Calling break in here will quickly exit outer loop
       if (stop_working)
-        break;
+        goto sender_exit_loop;
 
       // Send pulse ping and adjust the adaptive rate
       time_t pulse_time = time (NULL);
@@ -391,6 +389,9 @@ start_sender (void *ptr)
         } else {
             log_source (LEVEL_ERROR, "ping_send");
         }
+        // If for whatever reason this loops forever, this will catch the signal to exit.
+        if (stop_working)
+            goto sender_exit_loop;
         sleep (1);
       }
 
@@ -431,6 +432,7 @@ start_sender (void *ptr)
     if (current > end && !progress)
       break;
   }
+sender_exit_loop:
   wlog (LEVEL_INFO, "Send thread exiting...");
   free (tasks);
   stop_working = 1;
