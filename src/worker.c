@@ -91,13 +91,16 @@ throughput_tick (int num_recv, int num_sent, ipaddr addr_done, struct config *cn
   if (current_time - throughput.current_time >= cnf->sends_per_addr * PING_TIMEOUT) {
     float duration = (float)(current_time - throughput.current_time);
 
+    int reply_count_min2 = 0;
+    for (int i = 2; i <= cnf->sends_per_addr; ++i)
+        reply_count_min2 += throughput.done_reply_counts[i];
+
     wlog (LEVEL_INFO,
-      "Finished %.1f (%.1f/sec (0), %.1f/sec (1), %.1f/sec (2), %.1f/sec (3)). Total sent %.1f/sec. %s",
+      "Completed: %.1f/s (any), %.1f/s (r=0), %.1f/s (r=1), %.1f/s (r>1). Sent: %.1f/sec. At: %s",
       throughput.done_count / duration,
       throughput.done_reply_counts[0] / duration,
       throughput.done_reply_counts[1] / duration,
-      throughput.done_reply_counts[2] / duration,
-      throughput.done_reply_counts[3] / duration,
+      reply_count_min2 / duration,
       throughput.sent_count / duration,
       ip_ntoa (addr_done)
     );
@@ -230,14 +233,14 @@ adaptive_rate_tick(int *adaptive_rate, int rate)
   // Adapt the send rate based on the ping health
   if (pulse_health >= 0.75) {
     level = LEVEL_INFO;
-    *adaptive_rate /= HEALTH_FAILED_SCALE;
+    *adaptive_rate *= HEALTH_RECOVER_SCALE;
     // The adaptive rate was 0 (because we encountered an error)
     if (0 == *adaptive_rate) {
       // Set it to such a value that if it continues to pass health checks,
       // it will bounce back to the normal rate after N checks.
       *adaptive_rate = rate;
       for (int i = 0; i < HEALTH_RECOVERY_STEPS; ++i)
-        *adaptive_rate *= HEALTH_FAILED_SCALE;
+        *adaptive_rate /= HEALTH_RECOVER_SCALE;
     }
     // Make sure it doesn't exceed our actual rate
     *adaptive_rate = MIN(*adaptive_rate, rate);
@@ -371,7 +374,7 @@ start_sender (void *ptr)
         // https://groups.google.com/g/comp.protocols.tcp-ip/c/Qou9Sfgr77E
         // EPERM is not documented in sendto, so this is probably an OS warning to slow down.
         if (errno == EPERM) {
-            adaptive_rate *= HEALTH_FAILED_SCALE * HEALTH_FAILED_SCALE;
+            adaptive_rate *= HEALTH_FAILED_SCALE;
             sleep_quotient = SLEEP_INTERVAL_MS * adaptive_rate / 1000;
             wlog (LEVEL_WARN, "Received EPERM. AR=%d", adaptive_rate);
         } else if (errno == EACCES) {

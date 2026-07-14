@@ -35,6 +35,7 @@
 // The percent to scale the sending rate when a health check fails.
 // A value of 0.75 means to cut back 25%
 #define HEALTH_FAILED_SCALE 0.75
+#define HEALTH_RECOVER_SCALE (1.0 / (HEALTH_FAILED_SCALE * HEALTH_FAILED_SCALE))
 
 #define HEALTH_RECOVERY_STEPS 5
 
