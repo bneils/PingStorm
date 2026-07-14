@@ -145,11 +145,11 @@ def main():
         exit(1)
 
     # delete file
-    with open("image.dat", "wb") as f:
+    with open("bin/image.dat", "wb") as f:
         f.write(b"")
 
     # map that data to an numpy array
-    arr = np.memmap("image.dat", mode="w+", shape=(2**16, 2**16, 3))
+    arr = np.memmap("bin/image.dat", mode="w+", shape=(2**16, 2**16, 3))
     write_image_data(sys.argv[1], arr)
     arr.flush()
 
@@ -157,19 +157,22 @@ def main():
     print("Converting image to TIFF")
     image = pyvips.Image.new_from_array(arr, interpretation="rgb")
 
-    # image.write_to_file("output.tif")
-    image.tiffsave(
-        "bin/echo_map.tiff",
-        compression=ForeignTiffCompression.DEFLATE,
-        tile=True,
-        pyramid=True,
-        bigtiff=True,
-    )
+    methods = {
+        "jpeg": ForeignTiffCompression.JPEG,
+        "zstd": ForeignTiffCompression.ZSTD,
+    }
 
-    os.remove("image.dat")
+    for name, compression_method in methods.items():
+        image.tiffsave(
+            f"bin/heatmap_{name}.tiff",
+            compression=compression_method,
+            tile=True,
+            pyramid=True,
+            bigtiff=True,
+        )
 
+    os.remove("bin/image.dat")
     print("Done. Deleted cached file image.dat")
-
 
 if __name__ == "__main__":
     main()

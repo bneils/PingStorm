@@ -125,7 +125,9 @@ def extract_reply_data(filename, width, num_sent):
 
             zipped = np.dstack([addrs, replies])[0]
             filtered = np.where(zipped[:, 1] > 0)[0]
-            points = decode(zipped[filtered][:, 0], 2, 16) // addrs_per_px_w
+
+            # Type checker complains without this
+            points: np.ndarray[tuple[int]] = decode(zipped[filtered][:, 0], 2, 16) // addrs_per_px_w
 
             # Should be refactored
             for xy, r in zip(points, zipped[filtered][:, 1]):
